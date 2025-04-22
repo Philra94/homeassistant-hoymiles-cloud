@@ -32,7 +32,7 @@ Not all available sensors and settings are implemented yet, and additional funct
 
 1. Make sure you have [HACS](https://hacs.xyz/) installed
 2. Go to HACS → Integrations → Plus Icon → "Add Custom Repository"
-3. Enter the URL: `https://github.com/philipprau/hoymiles_homeassistant`
+3. Enter the URL: `https://github.com/Philra94/homeassistant-hoymiles-cloud`
 4. Select category: "Integration"
 5. Click "Add"
 6. Find and install "Hoymiles Cloud"
@@ -83,7 +83,7 @@ Please note that this code was developed with the assistance of AI, which may ex
 
 ## Support
 
-For bugs or feature requests, please [open an issue on GitHub](https://github.com/philipprau/hoymiles_homeassistant/issues).
+For bugs or feature requests, please [open an issue on GitHub](https://github.com/Philra94/homeassistant-hoymiles-cloud/issues).
 
 ## Disclaimer
 
