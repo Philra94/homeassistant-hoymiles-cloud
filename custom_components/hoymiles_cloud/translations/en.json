@@ -1,0 +1,84 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hoymiles Cloud",
+        "description": "Enter your Hoymiles Cloud credentials",
+        "data": {
+          "username": "Username (Email)",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to Hoymiles Cloud",
+      "invalid_auth": "Invalid authentication",
+      "no_stations": "No stations found for this account",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Account already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Hoymiles Cloud Options",
+        "description": "Configure the integration options",
+        "data": {
+          "scan_interval": "Data update interval (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "pv_power": {
+        "name": "PV Power"
+      },
+      "battery_power": {
+        "name": "Battery Power",
+        "state_attributes": {
+          "direction": "Power flow direction (positive = charging, negative = discharging)"
+        }
+      },
+      "battery_flow_direction": {
+        "name": "Battery Flow Direction",
+        "state": {
+          "charging": "Charging",
+          "discharging": "Discharging"
+        }
+      },
+      "battery_soc": {
+        "name": "Battery State of Charge"
+      },
+      "grid_power": {
+        "name": "Grid Power"
+      },
+      "load_power": {
+        "name": "Load Power"
+      },
+      "today_energy": {
+        "name": "Today's Energy"
+      },
+      "total_energy": {
+        "name": "Total Energy"
+      }
+    },
+    "select": {
+      "battery_mode": {
+        "name": "Battery Mode",
+        "state": {
+          "self_consumption": "Self Consumption",
+          "time_of_use": "Time of Use",
+          "backup": "Backup"
+        }
+      }
+    },
+    "number": {
+      "battery_reserve_soc": {
+        "name": "Battery Reserve SOC"
+      }
+    }
+  }
+} 

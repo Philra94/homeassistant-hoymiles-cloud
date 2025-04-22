@@ -1,0 +1,130 @@
+set_battery_mode:
+  name: Set Battery Mode
+  description: Set the operating mode of the Hoymiles battery.
+  target:
+    entity:
+      integration: hoymiles_cloud
+      domain: select
+  fields:
+    mode:
+      name: Mode
+      description: The battery operating mode to set
+      required: true
+      example: "Self Consumption"
+      selector:
+        select:
+          options:
+            - "Self-Consumption Mode"
+            - "Economy Mode"
+            - "Backup Mode"
+            - "Off-Grid Mode"
+            - "Peak Shaving Mode"
+            - "Time of Use Mode"
+
+set_reserve_soc:
+  name: Set Reserve SOC
+  description: Set the minimum reserve state of charge for the Hoymiles battery.
+  target:
+    entity:
+      integration: hoymiles_cloud
+      domain: number
+  fields:
+    value:
+      name: Reserve SOC
+      description: The minimum state of charge to maintain in the battery (0-100%)
+      required: true
+      example: 20
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+
+set_custom_mode_schedule:
+  name: Set Custom Mode Schedule
+  description: Configure the charge/discharge schedule for Custom Mode
+  target:
+    entity:
+      integration: hoymiles_cloud
+      domain: select
+  fields:
+    charge_start_time:
+      name: Charge Start Time
+      description: Time to start charging the battery
+      required: true
+      example: "03:00"
+      selector:
+        time:
+          
+    charge_end_time:
+      name: Charge End Time
+      description: Time to stop charging the battery
+      required: true
+      example: "05:00"
+      selector:
+        time:
+    
+    discharge_start_time:
+      name: Discharge Start Time
+      description: Time to start discharging the battery
+      required: true
+      example: "05:00"
+      selector:
+        time:
+    
+    discharge_end_time:
+      name: Discharge End Time
+      description: Time to stop discharging the battery
+      required: true
+      example: "03:00"
+      selector:
+        time:
+    
+    charge_power:
+      name: Charge Power
+      description: Power percentage for charging (10-100%)
+      required: true
+      example: 100
+      selector:
+        number:
+          min: 10
+          max: 100
+          step: 10
+          unit_of_measurement: "%"
+    
+    discharge_power:
+      name: Discharge Power
+      description: Power percentage for discharging (10-100%)
+      required: true
+      example: 100
+      selector:
+        number:
+          min: 10
+          max: 100
+          step: 10
+          unit_of_measurement: "%"
+    
+    charge_soc:
+      name: Charge SOC Limit
+      description: Maximum state of charge when charging (10-100%)
+      required: true
+      example: 90
+      selector:
+        number:
+          min: 10
+          max: 100
+          step: 10
+          unit_of_measurement: "%"
+    
+    discharge_soc:
+      name: Discharge SOC Limit
+      description: Minimum state of charge when discharging (10-100%)
+      required: true
+      example: 10
+      selector:
+        number:
+          min: 10
+          max: 100
+          step: 10
+          unit_of_measurement: "%" 
