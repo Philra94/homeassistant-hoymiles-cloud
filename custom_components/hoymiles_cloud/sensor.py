@@ -16,6 +16,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     UnitOfEnergy,
     UnitOfPower,
+    UnitOfElectricCurrent,
+    UnitOfElectricPotential,
     PERCENTAGE,
 )
 from homeassistant.core import HomeAssistant
@@ -216,6 +218,85 @@ SENSORS = [
         value_fn=lambda data: parse_timestamp(data.get("real_time_data", {}).get("data_time")),
     ),
 
+    # PV String data from indicators API
+    HoymilesSensorDescription(
+        key="pv_string_power",
+        name="PV String Power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: float(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
+                if item.get("key") == "pv_p_total"), 0)
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="pv1_voltage",
+        name="PV1 Voltage",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: float(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
+                if item.get("key") == "1_pv_v"), 0)
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="pv1_current",
+        name="PV1 Current",
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: float(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
+                if item.get("key") == "1_pv_i"), 0)
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="pv1_power",
+        name="PV1 Power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: float(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
+                if item.get("key") == "1_pv_p"), 0)
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="pv2_voltage",
+        name="PV2 Voltage",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: float(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
+                if item.get("key") == "2_pv_v"), 0)
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="pv2_current",
+        name="PV2 Current",
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: float(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
+                if item.get("key") == "2_pv_i"), 0)
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="pv2_power",
+        name="PV2 Power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: float(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
+                if item.get("key") == "2_pv_p"), 0)
+        ),
+    ),
+
     # Add a temperature sensor if needed
     # Example:
     # HoymilesSensorDescription(
@@ -347,14 +428,22 @@ class HoymilesSensor(CoordinatorEntity, SensorEntity):
         station_data = self.coordinator.data.get(self._station_id, {})
         
         # Check if we have the minimum data required
-        if "real_time_data" not in station_data:
-            return False
+        key_prefix = self.entity_description.key.split("_")[0]
+        
+        if key_prefix in ["pv1", "pv2"] or self.entity_description.key == "pv_string_power":
+            # This is a PV indicator sensor - check for PV indicators data
+            if "pv_indicators" not in station_data:
+                return False
+        else:
+            # This is a standard sensor - check for real-time data
+            if "real_time_data" not in station_data:
+                return False
             
         # Check if specific availability function is defined
         if self.entity_description.available_fn:
             return self.entity_description.available_fn(station_data)
             
-        return True 
+        return True
 
 
 class HoymilesBatteryModeSensor(CoordinatorEntity, SensorEntity):
