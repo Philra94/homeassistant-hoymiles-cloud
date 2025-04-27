@@ -12,6 +12,7 @@ from .const import (
     API_AUTH_URL,
     API_STATIONS_URL,
     API_REAL_TIME_DATA_URL,
+    API_PV_INDICATORS_URL,
     API_BATTERY_SETTINGS_READ_URL,
     API_BATTERY_SETTINGS_WRITE_URL,
     API_BATTERY_SETTINGS_STATUS_URL,
@@ -168,6 +169,41 @@ class HoymilesAPI:
                     return {}
         except Exception as e:
             _LOGGER.error("Error getting real-time data: %s", e)
+            raise
+
+    async def get_pv_indicators(self, station_id: str) -> Dict[str, Any]:
+        """Get PV indicators data for a station."""
+        if not self._token:
+            await self.authenticate()
+            
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": self._token,
+        }
+        
+        data = {
+            "sid": int(station_id),
+            "type": 4  # PV indicators type
+        }
+        
+        try:
+            async with self._session.post(
+                API_PV_INDICATORS_URL, headers=headers, json=data
+            ) as response:
+                resp = await response.json()
+                
+                if resp.get("status") == "0" and resp.get("message") == "success":
+                    return resp.get("data", {})
+                else:
+                    _LOGGER.error(
+                        "Failed to get PV indicators data: %s - %s", 
+                        resp.get("status"), 
+                        resp.get("message")
+                    )
+                    return {}
+        except Exception as e:
+            _LOGGER.error("Error getting PV indicators data: %s", e)
             raise
 
     async def get_battery_settings(self, station_id: str) -> Dict[str, Any]:

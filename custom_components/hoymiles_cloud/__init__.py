@@ -133,6 +133,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # Get real-time data
                     real_time_data = await api.get_real_time_data(station_id)
                     
+                    # Get PV indicators data
+                    try:
+                        pv_indicators = await api.get_pv_indicators(station_id)
+                        _LOGGER.debug("Got PV indicators data for station %s", station_id)
+                    except Exception as e:
+                        _LOGGER.warning("Failed to get PV indicators data: %s", e)
+                        pv_indicators = {}
+                    
                     # Get battery settings
                     try:
                         _LOGGER.debug("Fetching battery settings for station %s", station_id)
@@ -204,7 +212,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         
                         if stored_value is None or soc_value != stored_value:
                             _LOGGER.debug("Updating stored %s_soc from %s to %s", 
-                                        mode_key, stored_value, soc_value)
+                                          mode_key, stored_value, soc_value)
                             stored_data["stations"][station_id][f"{mode_key}_soc"] = soc_value
                             should_save = True
                     
@@ -215,6 +223,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     data[station_id] = {
                         "real_time_data": real_time_data,
                         "battery_settings": enhanced_battery_settings,
+                        "pv_indicators": pv_indicators
                     }
                 
                 _LOGGER.debug("=== Coordinator data update completed ===")
