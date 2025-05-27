@@ -46,7 +46,9 @@
         "name": "Battery Flow Direction",
         "state": {
           "charging": "Charging",
-          "discharging": "Discharging"
+          "discharging": "Discharging",
+          "idle": "Idle",
+          "unknown": "Unknown"
         }
       },
       "battery_soc": {

@@ -65,16 +65,13 @@ SENSORS = [
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_power", 0) or 0) * (
-            # In the API: positive means charging, negative means discharging
-            -1 if is_battery_charging(data) else 1
-        ),
+        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_power", 0) or 0),
     ),
     HoymilesSensorDescription(
         key="battery_flow_direction",
         name="Battery Flow Direction",
         icon="mdi:battery-charging",
-        value_fn=lambda data: "discharging" if not is_battery_charging(data) else "charging",
+        value_fn=lambda data: get_battery_flow_direction(data),
     ),
     HoymilesSensorDescription(
         key="grid_power",
@@ -123,7 +120,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("month_eq", 0) or 0),
+        value_fn=lambda data: float(data.get("real_time_data", {}).get("month_eq", 0) or 0),
     ),
     HoymilesSensorDescription(
         key="year_energy",
@@ -131,7 +128,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("year_eq", 0) or 0),
+        value_fn=lambda data: float(data.get("real_time_data", {}).get("year_eq", 0) or 0),
     ),
     HoymilesSensorDescription(
         key="total_energy",
@@ -139,7 +136,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("total_eq", 0) or 0),
+        value_fn=lambda data: float(data.get("real_time_data", {}).get("total_eq", 0) or 0),
     ),
     
     # Daily energy flows
@@ -149,7 +146,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("pv_to_load_eq", 0) or 0),
+        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("pv_to_load_eq", 0) or 0),
     ),
     HoymilesSensorDescription(
         key="grid_import_energy_today",
@@ -157,7 +154,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("meter_b_in_eq", 0) or 0),
+        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("meter_b_in_eq", 0) or 0),
     ),
     HoymilesSensorDescription(
         key="grid_export_energy_today",
@@ -165,7 +162,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("meter_b_out_eq", 0) or 0),
+        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("meter_b_out_eq", 0) or 0),
     ),
     HoymilesSensorDescription(
         key="battery_charge_energy_today",
@@ -173,7 +170,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_in_eq", 0) or 0),
+        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_in_eq", 0) or 0),
     ),
     HoymilesSensorDescription(
         key="battery_discharge_energy_today",
@@ -181,7 +178,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_out_eq", 0) or 0),
+        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_out_eq", 0) or 0),
     ),
     HoymilesSensorDescription(
         key="total_consumption_today",
@@ -189,7 +186,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("use_eq_total", 0) or 0),
+        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("use_eq_total", 0) or 0),
     ),
     
     # Cumulative grid metrics
@@ -199,7 +196,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("mb_in_eq", {}).get("total_eq", 0) or 0),
+        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("mb_in_eq", {}).get("total_eq", 0) or 0),
     ),
     HoymilesSensorDescription(
         key="grid_export_total",
@@ -207,7 +204,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("mb_out_eq", {}).get("total_eq", 0) or 0),
+        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("mb_out_eq", {}).get("total_eq", 0) or 0),
     ),
     
     # System status information
@@ -618,28 +615,87 @@ def parse_timestamp(timestamp_str):
         return None
 
 def is_battery_charging(data):
-    """Determine if the battery is charging based on energy flow metrics."""
+    """Determine if the battery is charging based on real-time power flow."""
     try:
         reflux_data = data.get("real_time_data", {}).get("reflux_station_data", {})
         
-        # If both values are available, compare them directly
-        bms_in_eq = int(reflux_data.get("bms_in_eq", 0) or 0)  # Energy into battery
-        bms_out_eq = int(reflux_data.get("bms_out_eq", 0) or 0)  # Energy out of battery
+        # Get the real-time battery power (bms_power)
+        # Positive values typically indicate charging, negative indicate discharging
+        bms_power = float(reflux_data.get("bms_power", 0) or 0)
         
-        # Check the recent energy flows
-        # Higher charge value than discharge in recent period indicates charging
-        if bms_in_eq > bms_out_eq:
-            return True
+        _LOGGER.debug("Battery power (bms_power): %s W", bms_power)
         
-        # Look at the flows data if available
+        # If we have a clear power reading, use it to determine direction
+        if abs(bms_power) > 10:  # Only consider significant power flows (> 10W)
+            # In most Hoymiles systems:
+            # Positive bms_power = charging (power flowing into battery)
+            # Negative bms_power = discharging (power flowing out of battery)
+            is_charging = bms_power > 0
+            _LOGGER.debug("Battery direction based on power: %s (power: %s W)", 
+                         "charging" if is_charging else "discharging", bms_power)
+            return is_charging
+        
+        # If power is near zero or unavailable, check flows data
         flows = reflux_data.get("flows", [])
         for flow in flows:
             # Check for flows to battery (in=4) from other components
-            if flow.get("in") == 4 and flow.get("v", 0) > 0:
+            if flow.get("in") == 4 and flow.get("v", 0) > 10:  # Significant flow to battery
+                _LOGGER.debug("Battery charging detected from flows data: %s W", flow.get("v"))
                 return True
-            
-        # Default to True (charging) if no clear discharge indicators
-        return True
+            # Check for flows from battery (out=4) to other components  
+            elif flow.get("out") == 4 and flow.get("v", 0) > 10:  # Significant flow from battery
+                _LOGGER.debug("Battery discharging detected from flows data: %s W", flow.get("v"))
+                return False
+        
+        # If no clear power flow detected, check if battery SOC is changing
+        # This is a fallback when power readings are not available
+        bms_in_eq = float(reflux_data.get("bms_in_eq", 0) or 0)  # Energy into battery today
+        bms_out_eq = float(reflux_data.get("bms_out_eq", 0) or 0)  # Energy out of battery today
+        
+        # Only use energy comparison as last resort and with significant difference
+        if abs(bms_in_eq - bms_out_eq) > 100:  # At least 100Wh difference
+            is_charging = bms_in_eq > bms_out_eq
+            _LOGGER.debug("Battery direction based on energy totals: %s (in: %s Wh, out: %s Wh)", 
+                         "charging" if is_charging else "discharging", bms_in_eq, bms_out_eq)
+            return is_charging
+        
+        # If we can't determine the direction, assume idle/standby (not actively charging)
+        _LOGGER.debug("Battery direction unclear, assuming standby/idle state")
+        return False
+        
     except Exception as e:
         _LOGGER.debug("Error determining battery charging status: %s", e)
-        return True 
+        return False
+
+
+def get_battery_flow_direction(data):
+    """Get a descriptive battery flow direction including idle state."""
+    try:
+        reflux_data = data.get("real_time_data", {}).get("reflux_station_data", {})
+        
+        # Get the real-time battery power (bms_power)
+        bms_power = float(reflux_data.get("bms_power", 0) or 0)
+        
+        # If we have a clear power reading, use it to determine direction
+        if abs(bms_power) > 10:  # Only consider significant power flows (> 10W)
+            if bms_power > 0:
+                return "charging"
+            else:
+                return "discharging"
+        
+        # If power is near zero, check flows data
+        flows = reflux_data.get("flows", [])
+        for flow in flows:
+            # Check for flows to battery (in=4) from other components
+            if flow.get("in") == 4 and flow.get("v", 0) > 10:  # Significant flow to battery
+                return "charging"
+            # Check for flows from battery (out=4) to other components  
+            elif flow.get("out") == 4 and flow.get("v", 0) > 10:  # Significant flow from battery
+                return "discharging"
+        
+        # If no significant power flow, return idle
+        return "idle"
+        
+    except Exception as e:
+        _LOGGER.debug("Error determining battery flow direction: %s", e)
+        return "unknown" 

@@ -25,7 +25,7 @@ from .hoymiles_api import HoymilesAPI
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR, Platform.NUMBER, Platform.SELECT, "custom_select"]
+PLATFORMS = [Platform.SENSOR, Platform.NUMBER, Platform.SELECT]
 
 # Define a helper function to convert mode number to key
 def _get_mode_key_for_num(mode_num):
