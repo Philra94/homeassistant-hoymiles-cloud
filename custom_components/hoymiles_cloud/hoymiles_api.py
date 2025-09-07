@@ -291,7 +291,11 @@ class HoymilesAPI:
                 
                 # Check for specific error messages
                 if status_data.get("status") != "0":
-                    _LOGGER.error("API error: %s - %s", status_data.get("status"), status_data.get("message"))
+                    # Handle "No Permission" error gracefully - this typically means no battery is connected
+                    if status_data.get("status") == "3" and "No Permission" in str(status_data.get("message", "")):
+                        _LOGGER.info("No battery detected for station %s (API error 3 - No Permission). Using default settings.", station_id)
+                    else:
+                        _LOGGER.error("API error: %s - %s", status_data.get("status"), status_data.get("message"))
                 
             except json.JSONDecodeError as e:
                 _LOGGER.warning("Error decoding status response JSON: %s", e)
@@ -300,7 +304,7 @@ class HoymilesAPI:
             _LOGGER.warning("Error checking battery settings status: %s", e)
         
         # If we can't get the settings, return a default value
-        _LOGGER.warning("Could not retrieve battery settings for station %s, using defaults", station_id)
+        _LOGGER.debug("Could not retrieve battery settings for station %s (likely no battery connected), using defaults", station_id)
         return {"data": {"mode": 1, "reserve_soc": 20}}
 
     async def set_battery_mode(self, station_id: str, mode: int) -> bool:
