@@ -65,16 +65,24 @@ SENSORS = [
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_power", 0) or 0) * (
-            # In the API: positive means charging, negative means discharging
-            -1 if is_battery_charging(data) else 1
+        value_fn=lambda data: (
+            lambda bms_power, charging_status: (
+                float(bms_power) if charging_status is not None else 0
+            )
+        )(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_power", 0) or 0,
+            is_battery_charging(data)
         ),
     ),
     HoymilesSensorDescription(
         key="battery_flow_direction",
         name="Battery Flow Direction",
         icon="mdi:battery-charging",
-        value_fn=lambda data: "discharging" if not is_battery_charging(data) else "charging",
+        value_fn=lambda data: (
+            "discharging" if is_battery_charging(data) is False else
+            "charging" if is_battery_charging(data) is True else
+            "unknown"
+        ),
     ),
     HoymilesSensorDescription(
         key="grid_power",
@@ -622,14 +630,21 @@ def is_battery_charging(data):
     try:
         reflux_data = data.get("real_time_data", {}).get("reflux_station_data", {})
         
-        # If both values are available, compare them directly
+        # Get battery power directly if available (positive = charging, negative = discharging)
+        bms_power = reflux_data.get("bms_power")
+        if bms_power is not None:
+            return float(bms_power) > 0
+        
+        # If both energy values are available, compare them directly
         bms_in_eq = int(reflux_data.get("bms_in_eq", 0) or 0)  # Energy into battery
         bms_out_eq = int(reflux_data.get("bms_out_eq", 0) or 0)  # Energy out of battery
         
-        # Check the recent energy flows
-        # Higher charge value than discharge in recent period indicates charging
-        if bms_in_eq > bms_out_eq:
-            return True
+        # If we have energy data, compare charge vs discharge
+        if bms_in_eq > 0 or bms_out_eq > 0:
+            if bms_out_eq > bms_in_eq:
+                return False  # More discharge than charge = discharging
+            elif bms_in_eq > bms_out_eq:
+                return True   # More charge than discharge = charging
         
         # Look at the flows data if available
         flows = reflux_data.get("flows", [])
@@ -637,9 +652,12 @@ def is_battery_charging(data):
             # Check for flows to battery (in=4) from other components
             if flow.get("in") == 4 and flow.get("v", 0) > 0:
                 return True
+            # Check for flows from battery (out=4) to other components  
+            if flow.get("out") == 4 and flow.get("v", 0) > 0:
+                return False
             
-        # Default to True (charging) if no clear discharge indicators
-        return True
+        # If no data is available, return None to indicate unknown state
+        return None
     except Exception as e:
         _LOGGER.debug("Error determining battery charging status: %s", e)
-        return True 
+        return None 
