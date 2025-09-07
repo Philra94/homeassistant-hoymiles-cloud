@@ -147,7 +147,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         battery_settings = await api.get_battery_settings(station_id)
                         _LOGGER.debug("Battery settings obtained: %s", "success" if battery_settings else "failed")
                     except Exception as e:
-                        _LOGGER.warning("Failed to get battery settings: %s", e)
+                        _LOGGER.debug("Failed to get battery settings (likely no battery connected): %s", e)
                         # Create default battery settings if they couldn't be retrieved
                         battery_settings = {"data": {"mode": 1, "reserve_soc": 20}}
                     
