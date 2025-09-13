@@ -634,17 +634,8 @@ def is_battery_charging(data):
         bms_power = reflux_data.get("bms_power")
         if bms_power is not None:
             return float(bms_power) > 0
-        
-        # If both energy values are available, compare them directly
-        bms_in_eq = int(reflux_data.get("bms_in_eq", 0) or 0)  # Energy into battery
-        bms_out_eq = int(reflux_data.get("bms_out_eq", 0) or 0)  # Energy out of battery
-        
-        # If we have energy data, compare charge vs discharge
-        if bms_in_eq > 0 or bms_out_eq > 0:
-            if bms_out_eq > bms_in_eq:
-                return False  # More discharge than charge = discharging
-            elif bms_in_eq > bms_out_eq:
-                return True   # More charge than discharge = charging
+        # Do not infer direction from cumulative daily energy totals, as it is inaccurate
+        # over the day. Prefer instantaneous flows below; otherwise return unknown.
         
         # Look at the flows data if available
         flows = reflux_data.get("flows", [])
