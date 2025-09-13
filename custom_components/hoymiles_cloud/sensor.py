@@ -41,6 +41,73 @@ from .hoymiles_api import HoymilesAPI
 _LOGGER = logging.getLogger(__name__)
 
 
+def safe_int_convert(value: Any) -> int:
+    """Safely convert a value to int, handling various edge cases.
+    
+    Args:
+        value: Input value that can be int, float, str, bool, None, or '-'.
+        
+    Returns:
+        int: Converted integer value. Returns 0 for invalid/missing data.
+        
+    Handles:
+        - Float strings like '22706.0' by converting to float first
+        - Missing data represented as '-', None, or empty string
+        - Whitespace-only strings
+        - Boolean values (True -> 1, False -> 0)
+    """
+    if value is None or value == '-' or value == '':
+        return 0
+    
+    # Handle whitespace-only strings
+    if isinstance(value, str) and value.strip() == '':
+        return 0
+    
+    # Handle boolean values
+    if isinstance(value, bool):
+        return int(value)
+    
+    try:
+        # Handle float strings like '22706.0' by converting to float first
+        return int(float(value))
+    except (ValueError, TypeError) as e:
+        _LOGGER.debug("Unexpected value during int conversion: %s, error: %s", value, e)
+        return 0
+
+
+def safe_float_convert(value: Any) -> float:
+    """Safely convert a value to float, handling various edge cases.
+    
+    Args:
+        value: Input value that can be int, float, str, bool, None, or '-'.
+        
+    Returns:
+        float: Converted float value. Returns 0.0 for invalid/missing data.
+        
+    Handles:
+        - Missing data represented as '-', None, or empty string
+        - Whitespace-only strings
+        - Boolean values (True -> 1.0, False -> 0.0)
+        - Integer and string representations of numbers
+    """
+    if value is None or value == '-' or value == '':
+        return 0.0
+    
+    # Handle whitespace-only strings
+    if isinstance(value, str) and value.strip() == '':
+        return 0.0
+    
+    # Handle boolean values
+    if isinstance(value, bool):
+        return float(value)
+    
+    try:
+        return float(value)
+    except (ValueError, TypeError) as e:
+        _LOGGER.debug("Unexpected value during float conversion: %s, error: %s", value, e)
+        return 0.0
+
+
 @dataclass
 class HoymilesSensorDescription(SensorEntityDescription):
     """Class describing Hoymiles sensor entities."""
@@ -57,7 +124,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: float(data.get("real_time_data", {}).get("real_power", 0) or 0),
+        value_fn=lambda data: safe_float_convert(data.get("real_time_data", {}).get("real_power", 0)),
     ),
     HoymilesSensorDescription(
         key="battery_power",
@@ -65,14 +132,9 @@ SENSORS = [
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: (
-            lambda bms_power, charging_status: (
-                float(bms_power) if charging_status is not None else 0
-            )
-        )(
-            data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_power", 0) or 0,
-            is_battery_charging(data)
-        ),
+        value_fn=lambda data: safe_float_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_power", 0)
+        ) if is_battery_charging(data) is not None else 0,
     ),
     HoymilesSensorDescription(
         key="battery_flow_direction",
@@ -90,7 +152,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("grid_power", 0) or 0),
+        value_fn=lambda data: safe_float_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("grid_power", 0)),
     ),
     HoymilesSensorDescription(
         key="load_power",
@@ -98,7 +160,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: float(data.get("real_time_data", {}).get("reflux_station_data", {}).get("load_power", 0) or 0),
+        value_fn=lambda data: safe_float_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("load_power", 0)),
     ),
     
     # Battery state
@@ -108,7 +170,7 @@ SENSORS = [
         native_unit_of_measurement=PERCENTAGE,
         device_class=SensorDeviceClass.BATTERY,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: int(
+        value_fn=lambda data: safe_int_convert(
             # First try to get real-time data if available
             data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_soc") or 
             # If not, use the current mode's reserve_soc from battery settings
@@ -123,7 +185,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("today_eq", 0) or 0),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("today_eq", 0)),
     ),
     HoymilesSensorDescription(
         key="month_energy",
@@ -131,7 +193,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("month_eq", 0) or 0),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("month_eq", 0)),
     ),
     HoymilesSensorDescription(
         key="year_energy",
@@ -139,7 +201,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("year_eq", 0) or 0),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("year_eq", 0)),
     ),
     HoymilesSensorDescription(
         key="total_energy",
@@ -147,7 +209,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("total_eq", 0) or 0),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("total_eq", 0)),
     ),
     
     # Daily energy flows
@@ -157,7 +219,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("pv_to_load_eq", 0) or 0),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("pv_to_load_eq", 0)),
     ),
     HoymilesSensorDescription(
         key="grid_import_energy_today",
@@ -165,7 +227,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("meter_b_in_eq", 0) or 0),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("meter_b_in_eq", 0)),
     ),
     HoymilesSensorDescription(
         key="grid_export_energy_today",
@@ -173,7 +235,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("meter_b_out_eq", 0) or 0),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("meter_b_out_eq", 0)),
     ),
     HoymilesSensorDescription(
         key="battery_charge_energy_today",
@@ -181,7 +243,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_in_eq", 0) or 0),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_in_eq", 0)),
     ),
     HoymilesSensorDescription(
         key="battery_discharge_energy_today",
@@ -189,7 +251,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_out_eq", 0) or 0),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_out_eq", 0)),
     ),
     HoymilesSensorDescription(
         key="total_consumption_today",
@@ -197,7 +259,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("use_eq_total", 0) or 0),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("use_eq_total", 0)),
     ),
     
     # Cumulative grid metrics
@@ -207,7 +269,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("mb_in_eq", {}).get("total_eq", 0) or 0),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("mb_in_eq", {}).get("total_eq", 0)),
     ),
     HoymilesSensorDescription(
         key="grid_export_total",
@@ -215,7 +277,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: int(data.get("real_time_data", {}).get("reflux_station_data", {}).get("mb_out_eq", {}).get("total_eq", 0) or 0),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("mb_out_eq", {}).get("total_eq", 0)),
     ),
     
     # System status information
@@ -233,7 +295,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: float(
+        value_fn=lambda data: safe_float_convert(
             next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
                 if item.get("key") == "pv_p_total"), 0)
         ),
@@ -244,7 +306,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfElectricPotential.VOLT,
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: float(
+        value_fn=lambda data: safe_float_convert(
             next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
                 if item.get("key") == "1_pv_v"), 0)
         ),
@@ -255,7 +317,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         device_class=SensorDeviceClass.CURRENT,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: float(
+        value_fn=lambda data: safe_float_convert(
             next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
                 if item.get("key") == "1_pv_i"), 0)
         ),
@@ -266,7 +328,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: float(
+        value_fn=lambda data: safe_float_convert(
             next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
                 if item.get("key") == "1_pv_p"), 0)
         ),
@@ -277,7 +339,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfElectricPotential.VOLT,
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: float(
+        value_fn=lambda data: safe_float_convert(
             next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
                 if item.get("key") == "2_pv_v"), 0)
         ),
@@ -288,7 +350,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         device_class=SensorDeviceClass.CURRENT,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: float(
+        value_fn=lambda data: safe_float_convert(
             next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
                 if item.get("key") == "2_pv_i"), 0)
         ),
@@ -299,7 +361,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: float(
+        value_fn=lambda data: safe_float_convert(
             next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
                 if item.get("key") == "2_pv_p"), 0)
         ),
@@ -633,7 +695,7 @@ def is_battery_charging(data):
         # Get battery power directly if available (positive = charging, negative = discharging)
         bms_power = reflux_data.get("bms_power")
         if bms_power is not None:
-            return float(bms_power) > 0
+            return safe_float_convert(bms_power) > 0
         # Do not infer direction from cumulative daily energy totals, as it is inaccurate
         # over the day. Prefer instantaneous flows below; otherwise return unknown.
         
