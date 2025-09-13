@@ -156,7 +156,14 @@ class HoymilesAPI:
             async with self._session.post(
                 API_REAL_TIME_DATA_URL, headers=headers, json=data
             ) as response:
-                resp = await response.json()
+                # Log raw text to better diagnose field availability across accounts/devices
+                resp_text = await response.text()
+                try:
+                    resp = json.loads(resp_text)
+                except json.JSONDecodeError:
+                    _LOGGER.debug("Real-time data non-JSON response: %s", resp_text)
+                    raise
+                _LOGGER.debug("Real-time data response: %s", json.dumps(resp, ensure_ascii=False))
                 
                 if resp.get("status") == "0" and resp.get("message") == "success":
                     return resp.get("data", {})
