@@ -41,24 +41,70 @@ from .hoymiles_api import HoymilesAPI
 _LOGGER = logging.getLogger(__name__)
 
 
-def safe_int_convert(value):
-    """Safely convert a value to int, handling float strings and '-' values."""
+def safe_int_convert(value: Any) -> int:
+    """Safely convert a value to int, handling various edge cases.
+    
+    Args:
+        value: Input value that can be int, float, str, bool, None, or '-'.
+        
+    Returns:
+        int: Converted integer value. Returns 0 for invalid/missing data.
+        
+    Handles:
+        - Float strings like '22706.0' by converting to float first
+        - Missing data represented as '-', None, or empty string
+        - Whitespace-only strings
+        - Boolean values (True -> 1, False -> 0)
+    """
     if value is None or value == '-' or value == '':
         return 0
+    
+    # Handle whitespace-only strings
+    if isinstance(value, str) and value.strip() == '':
+        return 0
+    
+    # Handle boolean values
+    if isinstance(value, bool):
+        return int(value)
+    
     try:
         # Handle float strings like '22706.0' by converting to float first
         return int(float(value))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        _LOGGER.debug("Unexpected value during int conversion: %s, error: %s", value, e)
         return 0
 
 
-def safe_float_convert(value):
-    """Safely convert a value to float, handling '-' values."""
+def safe_float_convert(value: Any) -> float:
+    """Safely convert a value to float, handling various edge cases.
+    
+    Args:
+        value: Input value that can be int, float, str, bool, None, or '-'.
+        
+    Returns:
+        float: Converted float value. Returns 0.0 for invalid/missing data.
+        
+    Handles:
+        - Missing data represented as '-', None, or empty string
+        - Whitespace-only strings
+        - Boolean values (True -> 1.0, False -> 0.0)
+        - Integer and string representations of numbers
+    """
     if value is None or value == '-' or value == '':
         return 0.0
+    
+    # Handle whitespace-only strings
+    if isinstance(value, str) and value.strip() == '':
+        return 0.0
+    
+    # Handle boolean values
+    if isinstance(value, bool):
+        return float(value)
+    
     try:
         return float(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        _LOGGER.debug("Unexpected value during float conversion: %s, error: %s", value, e)
         return 0.0
 
 
@@ -86,14 +132,9 @@ SENSORS = [
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: (
-            lambda bms_power, charging_status: (
-                safe_float_convert(bms_power) if charging_status is not None else 0
-            )
-        )(
-            data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_power", 0) or 0,
-            is_battery_charging(data)
-        ),
+        value_fn=lambda data: safe_float_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_power", 0)
+        ) if is_battery_charging(data) is not None else 0,
     ),
     HoymilesSensorDescription(
         key="battery_flow_direction",
