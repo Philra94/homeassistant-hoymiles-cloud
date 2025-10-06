@@ -28,6 +28,7 @@ from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
 )
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -677,14 +678,23 @@ class HoymilesBatteryModeSettingSensor(CoordinatorEntity, SensorEntity):
         return False
 
 def parse_timestamp(timestamp_str):
-    """Parse timestamp string from the API."""
+    """Parse timestamp string from the API.
+
+    The API returns naive timestamps (without timezone info) that represent
+    the local time. We need to interpret them in the Home Assistant timezone
+    and convert to UTC for proper display.
+    """
     if not timestamp_str:
         return None
     try:
-        dt_object = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-        return dt_object.replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        _LOGGER.warning("Failed to parse timestamp: %s", timestamp_str)
+        # Parse the naive datetime string
+        naive_dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+
+        # Assume the timestamp is in Home Assistant's configured timezone
+        # and convert it to UTC-aware datetime
+        return dt_util.as_utc(dt_util.DEFAULT_TIME_ZONE.localize(naive_dt))
+    except (ValueError, TypeError) as e:
+        _LOGGER.warning("Failed to parse timestamp: %s, error: %s", timestamp_str, e)
         return None
 
 def is_battery_charging(data):
