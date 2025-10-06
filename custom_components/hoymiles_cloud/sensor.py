@@ -677,7 +677,7 @@ class HoymilesBatteryModeSettingSensor(CoordinatorEntity, SensorEntity):
                 
         return False
 
-def parse_timestamp(timestamp_str):
+def parse_timestamp(timestamp_str: str | None) -> datetime | None:
     """Parse timestamp string from the API.
 
     The API returns naive timestamps (without timezone info) that represent
@@ -692,7 +692,8 @@ def parse_timestamp(timestamp_str):
 
         # Assume the timestamp is in Home Assistant's configured timezone
         # and convert it to UTC-aware datetime
-        return dt_util.as_utc(dt_util.DEFAULT_TIME_ZONE.localize(naive_dt))
+        local_aware_dt = naive_dt.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+        return dt_util.as_utc(local_aware_dt)
     except (ValueError, TypeError) as e:
         _LOGGER.warning("Failed to parse timestamp: %s, error: %s", timestamp_str, e)
         return None
