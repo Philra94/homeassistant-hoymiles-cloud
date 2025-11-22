@@ -367,21 +367,9 @@ class HoymilesAPI:
             _LOGGER.debug("Setting Peak Shaving Mode with reserve_soc: 30, max_soc: 70, meter_power: 3000")
             
         elif mode == 8:  # Time of Use Mode
-            # Time of Use needs time schedules
+            # Do NOT send any time schedule – only change the mode
             mode_data["data"]["reserve_soc"] = 10
-            mode_data["data"]["time"] = [
-                {
-                    "cs_time": "03:00",
-                    "ce_time": "05:00",
-                    "c_power": 100,
-                    "dcs_time": "05:00",
-                    "dce_time": "03:00",
-                    "dc_power": 100,
-                    "charge_soc": 90,
-                    "dis_charge_soc": 10
-                }
-            ]
-            _LOGGER.debug("Setting Time of Use Mode with default schedule")
+            _LOGGER.debug("Setting Time of Use Mode WITHOUT time schedule")
         
         # Try to preserve any existing settings for the mode we're switching to
         try:
