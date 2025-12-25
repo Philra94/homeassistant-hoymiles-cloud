@@ -16,6 +16,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     UnitOfEnergy,
     UnitOfPower,
+    UnitOfMass,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
     PERCENTAGE,
@@ -179,6 +180,21 @@ SENSORS = [
         ),
     ),
     
+    # Environmental factors
+    HoymilesSensorDescription(
+        key="co2_emission_reduction",
+        name="CO2 Emission Reduction",
+        native_unit_of_measurement=UnitOfMass.GRAMS,
+        device_class=SensorDeviceClass.WEIGHT,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("co2_emission_reduction", 0)),
+    ),
+    HoymilesSensorDescription(
+        key="plant_tree",
+        name="Equivalent Trees Planted",
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("plant_tree", 0)),
+    ),
+
     # Energy production - cumulative values
     HoymilesSensorDescription(
         key="today_energy",
@@ -702,7 +718,6 @@ def is_battery_charging(data):
     """Determine if the battery is charging based on energy flow metrics."""
     try:
         reflux_data = data.get("real_time_data", {}).get("reflux_station_data", {})
-        
         # Get battery power directly if available (positive = charging, negative = discharging)
         bms_power = reflux_data.get("bms_power")
         if bms_power is not None:
