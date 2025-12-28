@@ -12,6 +12,8 @@ from .const import (
     API_AUTH_URL,
     API_STATIONS_URL,
     API_REAL_TIME_DATA_URL,
+    API_MICROINVERTERS_URL,
+    API_MICRO_DETAIL_URL,
     API_PV_INDICATORS_URL,
     API_BATTERY_SETTINGS_READ_URL,
     API_BATTERY_SETTINGS_WRITE_URL,
@@ -135,6 +137,97 @@ class HoymilesAPI:
                     return {}
         except Exception as e:
             _LOGGER.error("Error getting stations: %s", e)
+            raise
+
+    async def get_microinverters_by_stations(self, station_id: str) -> Dict[str, str]:
+        """Get all microinverters with detail for a station."""
+        if not self._token:
+            _LOGGER.debug("No token available, authenticating first")
+            await self.authenticate()
+            
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": self._token,
+        }
+        
+        data = {
+            "sid": int(station_id),
+            "page_size": 1000,
+            "page_num": 1,
+            "show_warn": 0
+        }
+        
+        try:
+            _LOGGER.debug("Sending request to get microinverters with token: %s...", self._token[:20] if self._token else "None")
+            async with self._session.post(
+                API_MICROINVERTERS_URL, headers=headers, json=data
+            ) as response:
+                resp_text = await response.text()
+                _LOGGER.debug("Full microinverters response: %s", resp_text)
+                
+                resp = json.loads(resp_text)
+                
+                if resp.get("status") == "0" and resp.get("message") == "success":
+                    microinverters = {}
+                    microinverters_data = resp.get("data", {}).get("list", [])
+                    _LOGGER.debug("Raw microinverters data: %s", microinverters_data)
+                    
+                    if not microinverters_data:
+                        _LOGGER.warning("API returned success but microinverters list is empty")
+                        
+                    for microinverter in microinverters_data:
+                        microinverter_id = str(microinverter.get("id"))
+
+                        data = {
+                            "id": int(microinverter_id),
+                            "sid": int(station_id),
+                        }
+
+                        try:
+                            _LOGGER.debug("Sending request to get microinverters detail with token: %s...", self._token[:20] if self._token else "None")
+                            async with self._session.post(
+                                API_MICRO_DETAIL_URL, headers=headers, json=data
+                            ) as response:
+                                resp_text = await response.text()
+                                _LOGGER.debug("Full microinverter %s single detail response: %s", microinverter_id, resp_text)
+                                
+                                resp = json.loads(resp_text)
+                                
+                                if resp.get("status") == "0" and resp.get("message") == "success":
+                                    microinverter_single = {}
+                                    microinverter_single_data = resp.get("data", {})
+                                    _LOGGER.debug("Raw single microinverter id %s data: %s", microinverter_id, microinverter_single_data)
+                                    
+                                    if not microinverter_single_data:
+                                        _LOGGER.warning("API returned success but microinverter %s single data is empty", microinverter_id)
+                                        
+                                    _LOGGER.debug("Adding microinverters: %s - %s", microinverter_id, microinverter_single_data)
+                                    microinverters[microinverter_id] = microinverter_single_data
+
+                                else:
+                                    microinverters[microinverter_id] = {}
+                                    _LOGGER.error(
+                                        "Failed to get microinverters details: %s - %s", 
+                                        resp.get("status"), 
+                                        resp.get("message")
+                                    )
+
+                        except Exception as e:
+                            _LOGGER.error("Error getting detail of microinverter: %s", e)
+                            raise
+
+                    _LOGGER.debug("Returning microinverters dictionary: %s", microinverters)
+                    return microinverters
+                else:
+                    _LOGGER.error(
+                        "Failed to get microinverters: %s - %s", 
+                        resp.get("status"), 
+                        resp.get("message")
+                    )
+                    return {}
+        except Exception as e:
+            _LOGGER.error("Error getting microinverters: %s", e)
             raise
 
     async def get_real_time_data(self, station_id: str) -> Dict[str, Any]:

@@ -132,7 +132,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     
                     # Get real-time data
                     real_time_data = await api.get_real_time_data(station_id)
-                    
+
+                    # Get microinverters data
+                    microinverters_data = await api.get_microinverters_by_stations(station_id)
+
                     # Get PV indicators data
                     try:
                         pv_indicators = await api.get_pv_indicators(station_id)
@@ -222,11 +225,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     
                     data[station_id] = {
                         "real_time_data": real_time_data,
+                        "microinverters_data": microinverters_data,
                         "battery_settings": enhanced_battery_settings,
                         "pv_indicators": pv_indicators
                     }
                 
                 _LOGGER.debug("=== Coordinator data update completed ===")
+
+                # TODO: MUST BE REMOVED by PULLREQUEST
+                #with open("/share/hoymiles_cloud_data.json", "w") as file:
+                #    json.dump(data, file)
+
                 return data
         except Exception as e:
             _LOGGER.error("Error updating data: %s", e)
