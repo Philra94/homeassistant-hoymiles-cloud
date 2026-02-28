@@ -379,8 +379,74 @@ SENSORS = [
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda data: safe_float_convert(
-            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", [])
                 if item.get("key") == "2_pv_p"), 0)
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="pv3_voltage",
+        name="PV3 Voltage",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: safe_float_convert(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", [])
+                if item.get("key") == "3_pv_v"), 0)
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="pv3_current",
+        name="PV3 Current",
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: safe_float_convert(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", [])
+                if item.get("key") == "3_pv_i"), 0)
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="pv3_power",
+        name="PV3 Power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: safe_float_convert(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", [])
+                if item.get("key") == "3_pv_p"), 0)
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="pv4_voltage",
+        name="PV4 Voltage",
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: safe_float_convert(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", [])
+                if item.get("key") == "4_pv_v"), 0)
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="pv4_current",
+        name="PV4 Current",
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: safe_float_convert(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", [])
+                if item.get("key") == "4_pv_i"), 0)
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="pv4_power",
+        name="PV4 Power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: safe_float_convert(
+            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", [])
+                if item.get("key") == "4_pv_p"), 0)
         ),
     ),
 
@@ -517,7 +583,7 @@ class HoymilesSensor(CoordinatorEntity, SensorEntity):
         # Check if we have the minimum data required
         key_prefix = self.entity_description.key.split("_")[0]
         
-        if key_prefix in ["pv1", "pv2"] or self.entity_description.key == "pv_string_power":
+        if key_prefix in ["pv1", "pv2", "pv3", "pv4"] or self.entity_description.key == "pv_string_power":
             # This is a PV indicator sensor - check for PV indicators data
             if "pv_indicators" not in station_data:
                 return False
