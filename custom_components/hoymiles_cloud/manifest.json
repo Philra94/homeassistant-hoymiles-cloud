@@ -8,7 +8,8 @@
   "iot_class": "cloud_polling",
   "version": "0.1.0",
   "requirements": [
-    "aiohttp>=3.8.0"
+    "aiohttp>=3.8.0",
+    "argon2-cffi>=21.3.0"
   ],
   "icon": "mdi:solar-power-variant"
 } 
