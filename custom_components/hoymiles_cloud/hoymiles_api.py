@@ -10,6 +10,8 @@ import aiohttp
 
 from .const import (
     API_AUTH_URL,
+    API_AUTH_PRE_INSP_URL,
+    API_AUTH_V3_URL,
     API_STATIONS_URL,
     API_REAL_TIME_DATA_URL,
     API_MICROINVERTERS_URL,
@@ -45,42 +47,133 @@ class HoymilesAPI:
         """Check if the token is expired."""
         return time.time() >= self._token_expires_at
 
-    async def authenticate(self) -> bool:
-        """Authenticate with the Hoymiles API."""
+    async def _authenticate_argon2(self) -> bool:
+        """Authenticate using the modern Argon2 flow (API v3)."""
         try:
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            }
-            
-            # Based on testing, MD5 hashing of the password is sufficient for authentication
-            md5_password = hashlib.md5(self._password.encode()).hexdigest()
-            
-            # If MD5 doesn't work, you can try the combined hash format from HAR analysis:
-            # second_part = "detsiHMyw54xS3UBlJCzLHzPgKv6VTDCrt3QxlyUigg="
-            # hashed_password = f"{md5_password}.{second_part}"
-            
-            data = {
-                "user_name": self._username,
-                "password": md5_password,
-            }
-            
+            from argon2.low_level import hash_secret_raw, Type
+        except ImportError:
+            _LOGGER.debug("argon2-cffi not available, skipping Argon2 authentication")
+            return False
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        # Step 1: Pre-inspection — get server-provided salt and nonce
+        try:
+            async with self._session.post(
+                API_AUTH_PRE_INSP_URL,
+                headers=headers,
+                json={"u": self._username},
+            ) as response:
+                pre_resp = await response.json()
+        except Exception as e:
+            _LOGGER.debug("Argon2 pre-inspection request failed: %s", e)
+            return False
+
+        if pre_resp.get("status") != "0":
+            _LOGGER.debug(
+                "Argon2 pre-inspection rejected: %s - %s",
+                pre_resp.get("status"),
+                pre_resp.get("message"),
+            )
+            return False
+
+        pre_data = pre_resp.get("data", {})
+        salt_b64 = pre_data.get("a")
+        nonce = pre_data.get("n")
+        if not salt_b64 or not nonce:
+            _LOGGER.debug("Argon2 pre-inspection returned incomplete data: %s", pre_data)
+            return False
+
+        # Step 2: Compute Argon2id hash using the server-provided salt
+        try:
+            import base64
+            salt = base64.b64decode(salt_b64)
+            raw_hash = hash_secret_raw(
+                secret=self._password.encode(),
+                salt=salt,
+                time_cost=3,
+                memory_cost=32768,
+                parallelism=1,
+                hash_len=32,
+                type=Type.ID,
+            )
+            ch = raw_hash.hex()
+        except Exception as e:
+            _LOGGER.debug("Argon2 hashing failed: %s", e)
+            return False
+
+        # Step 3: Login with Argon2 credentials
+        try:
+            async with self._session.post(
+                API_AUTH_V3_URL,
+                headers=headers,
+                json={"u": self._username, "ch": ch, "n": nonce},
+            ) as response:
+                resp = await response.json()
+        except Exception as e:
+            _LOGGER.debug("Argon2 login request failed: %s", e)
+            return False
+
+        if resp.get("status") == "0" and resp.get("message") == "success":
+            self._token = resp.get("data", {}).get("token")
+            self._token_expires_at = time.time() + self._token_valid_time
+            _LOGGER.debug("Argon2 authentication succeeded")
+            return True
+
+        _LOGGER.debug(
+            "Argon2 authentication failed: %s - %s",
+            resp.get("status"),
+            resp.get("message"),
+        )
+        return False
+
+    async def _authenticate_legacy(self) -> bool:
+        """Authenticate using the legacy MD5 flow (API v0)."""
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        md5_password = hashlib.md5(self._password.encode()).hexdigest()
+        data = {
+            "user_name": self._username,
+            "password": md5_password,
+        }
+        try:
             async with self._session.post(
                 API_AUTH_URL, headers=headers, json=data
             ) as response:
                 resp = await response.json()
-                
-                if resp.get("status") == "0" and resp.get("message") == "success":
-                    self._token = resp.get("data", {}).get("token")
-                    self._token_expires_at = time.time() + self._token_valid_time
-                    return True
-                else:
-                    _LOGGER.error(
-                        "Authentication failed: %s - %s", 
-                        resp.get("status"), 
-                        resp.get("message")
-                    )
-                    return False
+        except Exception as e:
+            _LOGGER.debug("Legacy authentication request failed: %s", e)
+            return False
+
+        if resp.get("status") == "0" and resp.get("message") == "success":
+            self._token = resp.get("data", {}).get("token")
+            self._token_expires_at = time.time() + self._token_valid_time
+            _LOGGER.debug("Legacy MD5 authentication succeeded")
+            return True
+
+        _LOGGER.error(
+            "Authentication failed: %s - %s",
+            resp.get("status"),
+            resp.get("message"),
+        )
+        return False
+
+    async def authenticate(self) -> bool:
+        """Authenticate with the Hoymiles API.
+
+        Tries the modern Argon2 v3 endpoint first, then falls back to
+        the legacy MD5 v0 endpoint if Argon2 is unavailable or rejected.
+        """
+        try:
+            if await self._authenticate_argon2():
+                return True
+            _LOGGER.debug("Argon2 auth failed or unavailable, trying legacy MD5 auth")
+            return await self._authenticate_legacy()
         except Exception as e:
             _LOGGER.error("Error during authentication: %s", e)
             raise
