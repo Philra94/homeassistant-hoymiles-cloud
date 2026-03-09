@@ -9,6 +9,8 @@ STORAGE_KEY = f"{DOMAIN}_data"
 # API Constants
 API_BASE_URL = "https://neapi.hoymiles.com"
 API_AUTH_URL = f"{API_BASE_URL}/iam/pub/0/auth/login"
+API_AUTH_PRE_INSP_URL = f"{API_BASE_URL}/iam/pub/3/auth/pre-insp"
+API_AUTH_V3_URL = f"{API_BASE_URL}/iam/pub/3/auth/login"
 API_STATIONS_URL = f"{API_BASE_URL}/pvm/api/0/station/select_by_page"
 API_REAL_TIME_DATA_URL = f"{API_BASE_URL}/pvm-data/api/0/station/data/count_station_real_data" 
 API_MICROINVERTERS_URL = f"{API_BASE_URL}/pvm/api/0/dev/micro/select_by_station"
