@@ -1,5 +1,6 @@
 """API client for Hoymiles Cloud."""
 import asyncio
+import base64
 import logging
 import time
 import hashlib
@@ -12,6 +13,7 @@ from .const import (
     API_AUTH_URL,
     API_AUTH_PRE_INSP_URL,
     API_AUTH_V3_URL,
+    API_USER_ME_URL,
     API_STATIONS_URL,
     API_REAL_TIME_DATA_URL,
     API_MICROINVERTERS_URL,
@@ -42,23 +44,85 @@ class HoymilesAPI:
         self._token = None
         self._token_expires_at = 0
         self._token_valid_time = 7200  # Default token validity in seconds
+        self._auth_method: Optional[str] = None
+        self._last_auth_status: Optional[str] = None
+        self._last_auth_message: Optional[str] = None
 
     def is_token_expired(self) -> bool:
         """Check if the token is expired."""
         return time.time() >= self._token_expires_at
 
-    async def _authenticate_argon2(self) -> bool:
-        """Authenticate using the modern Argon2 flow (API v3)."""
-        try:
-            from argon2.low_level import hash_secret_raw, Type
-        except ImportError:
-            _LOGGER.debug("argon2-cffi not available, skipping Argon2 authentication")
-            return False
+    @property
+    def auth_method(self) -> Optional[str]:
+        """Return the last successful authentication method."""
+        return self._auth_method
 
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+    @property
+    def last_auth_status(self) -> Optional[str]:
+        """Return the last authentication status code."""
+        return self._last_auth_status
+
+    @property
+    def last_auth_message(self) -> Optional[str]:
+        """Return the last authentication error message."""
+        return self._last_auth_message
+
+    def _set_auth_failure(self, status: Optional[str], message: Optional[str]) -> None:
+        """Store the most recent authentication failure."""
+        self._last_auth_status = str(status) if status is not None else None
+        self._last_auth_message = message
+
+    def _set_auth_success(self, method: str, token: Optional[str]) -> None:
+        """Persist successful authentication state."""
+        self._token = token
+        self._token_expires_at = time.time() + self._token_valid_time
+        self._auth_method = method
+        self._last_auth_status = None
+        self._last_auth_message = None
+
+    def _json_headers(self, *, include_accept: bool = True) -> Dict[str, str]:
+        """Build JSON request headers."""
+        headers = {"Content-Type": "application/json"}
+        if include_accept:
+            headers["Accept"] = "application/json"
+        return headers
+
+    def _auth_headers(self, *, include_accept: bool = True) -> Dict[str, str]:
+        """Build authenticated request headers."""
+        headers = self._json_headers(include_accept=include_accept)
+        if self._token:
+            # The API expects the raw token, not a Bearer prefix.
+            headers["Authorization"] = self._token
+        return headers
+
+    async def _authenticate_argon2(self) -> bool:
+        """Authenticate using the modern browser flow (API v3).
+
+        The web app always starts with ``/iam/pub/3/auth/pre-insp`` and then
+        selects the hash format based on the returned salt field ``a``:
+
+        - If ``a`` is present, compute an Argon2id hash from the password and
+          salt, then submit that hex digest as ``ch``.
+        - If ``a`` is ``null``, mimic the browser's fallback and submit
+          ``ch = md5(password) + "." + base64(sha256(password))``.
+
+        In both cases, send the returned nonce ``n`` back to
+        ``/iam/pub/3/auth/login`` and use the resulting token directly in the
+        ``Authorization`` header. To validate or adjust this flow, reproduce a
+        real login in the browser network panel or run
+        ``python3 scripts/test_login_flow.py`` and compare the request payloads.
+        """
+        hash_secret_raw = None
+        Type = None
+        try:
+            from argon2.low_level import hash_secret_raw as _hash_secret_raw, Type as _Type
+
+            hash_secret_raw = _hash_secret_raw
+            Type = _Type
+        except ImportError:
+            _LOGGER.debug("argon2-cffi not available, will only use unsalted v3 auth")
+
+        headers = self._json_headers()
 
         # Step 1: Pre-inspection — get server-provided salt and nonce
         try:
@@ -73,6 +137,7 @@ class HoymilesAPI:
             return False
 
         if pre_resp.get("status") != "0":
+            self._set_auth_failure(pre_resp.get("status"), pre_resp.get("message"))
             _LOGGER.debug(
                 "Argon2 pre-inspection rejected: %s - %s",
                 pre_resp.get("status"),
@@ -83,26 +148,40 @@ class HoymilesAPI:
         pre_data = pre_resp.get("data", {})
         salt_b64 = pre_data.get("a")
         nonce = pre_data.get("n")
-        if not salt_b64 or not nonce:
+        if not nonce:
+            self._set_auth_failure(None, "Argon2 pre-inspection returned incomplete data")
             _LOGGER.debug("Argon2 pre-inspection returned incomplete data: %s", pre_data)
             return False
 
-        # Step 2: Compute Argon2id hash using the server-provided salt
+        # Step 2: Build the browser-style credential hash for the returned variant.
         try:
-            import base64
-            salt = base64.b64decode(salt_b64)
-            raw_hash = hash_secret_raw(
-                secret=self._password.encode(),
-                salt=salt,
-                time_cost=3,
-                memory_cost=32768,
-                parallelism=1,
-                hash_len=32,
-                type=Type.ID,
-            )
-            ch = raw_hash.hex()
+            if salt_b64:
+                if hash_secret_raw is None or Type is None:
+                    self._set_auth_failure(
+                        None,
+                        "Argon2 support is unavailable for salted v3 authentication",
+                    )
+                    return False
+
+                salt = base64.b64decode(salt_b64)
+                raw_hash = hash_secret_raw(
+                    secret=self._password.encode(),
+                    salt=salt,
+                    time_cost=3,
+                    memory_cost=32768,
+                    parallelism=1,
+                    hash_len=32,
+                    type=Type.ID,
+                )
+                ch = raw_hash.hex()
+                auth_method = "argon2_v3"
+            else:
+                md5_password = hashlib.md5(self._password.encode()).hexdigest()
+                sha256_password = hashlib.sha256(self._password.encode()).digest()
+                ch = f"{md5_password}.{base64.b64encode(sha256_password).decode()}"
+                auth_method = "sha256_v3"
         except Exception as e:
-            _LOGGER.debug("Argon2 hashing failed: %s", e)
+            _LOGGER.debug("Modern v3 hashing failed: %s", e)
             return False
 
         # Step 3: Login with Argon2 credentials
@@ -118,11 +197,11 @@ class HoymilesAPI:
             return False
 
         if resp.get("status") == "0" and resp.get("message") == "success":
-            self._token = resp.get("data", {}).get("token")
-            self._token_expires_at = time.time() + self._token_valid_time
-            _LOGGER.debug("Argon2 authentication succeeded")
+            self._set_auth_success(auth_method, resp.get("data", {}).get("token"))
+            _LOGGER.debug("Modern v3 authentication succeeded via %s", auth_method)
             return True
 
+        self._set_auth_failure(resp.get("status"), resp.get("message"))
         _LOGGER.debug(
             "Argon2 authentication failed: %s - %s",
             resp.get("status"),
@@ -132,10 +211,7 @@ class HoymilesAPI:
 
     async def _authenticate_legacy(self) -> bool:
         """Authenticate using the legacy MD5 flow (API v0)."""
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+        headers = self._json_headers()
         md5_password = hashlib.md5(self._password.encode()).hexdigest()
         data = {
             "user_name": self._username,
@@ -151,11 +227,11 @@ class HoymilesAPI:
             return False
 
         if resp.get("status") == "0" and resp.get("message") == "success":
-            self._token = resp.get("data", {}).get("token")
-            self._token_expires_at = time.time() + self._token_valid_time
+            self._set_auth_success("legacy_md5_v0", resp.get("data", {}).get("token"))
             _LOGGER.debug("Legacy MD5 authentication succeeded")
             return True
 
+        self._set_auth_failure(resp.get("status"), resp.get("message"))
         _LOGGER.error(
             "Authentication failed: %s - %s",
             resp.get("status"),
@@ -170,6 +246,9 @@ class HoymilesAPI:
         the legacy MD5 v0 endpoint if Argon2 is unavailable or rejected.
         """
         try:
+            self._auth_method = None
+            self._last_auth_status = None
+            self._last_auth_message = None
             if await self._authenticate_argon2():
                 return True
             _LOGGER.debug("Argon2 auth failed or unavailable, trying legacy MD5 auth")
@@ -178,18 +257,39 @@ class HoymilesAPI:
             _LOGGER.error("Error during authentication: %s", e)
             raise
 
+    async def get_current_user(self) -> Dict[str, Any]:
+        """Return the current authenticated user details."""
+        if not self._token or self.is_token_expired():
+            _LOGGER.debug("No valid token available, authenticating first")
+            await self.authenticate()
+
+        try:
+            async with self._session.post(
+                API_USER_ME_URL,
+                headers=self._auth_headers(),
+                json={},
+            ) as response:
+                resp = await response.json()
+        except Exception as e:
+            _LOGGER.error("Error getting current user: %s", e)
+            raise
+
+        if resp.get("status") == "0" and resp.get("message") == "success":
+            return resp.get("data", {})
+
+        _LOGGER.error(
+            "Failed to get current user: %s - %s",
+            resp.get("status"),
+            resp.get("message"),
+        )
+        return {}
+
     async def get_stations(self) -> Dict[str, str]:
         """Get all stations for the authenticated user."""
-        if not self._token:
+        if not self._token or self.is_token_expired():
             _LOGGER.debug("No token available, authenticating first")
             await self.authenticate()
-            
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": self._token,
-        }
-        
+
         data = {
             "page_size": 10,
             "page_num": 1,
@@ -198,7 +298,7 @@ class HoymilesAPI:
         try:
             _LOGGER.debug("Sending request to get stations with token: %s...", self._token[:20] if self._token else "None")
             async with self._session.post(
-                API_STATIONS_URL, headers=headers, json=data
+                API_STATIONS_URL, headers=self._auth_headers(), json=data
             ) as response:
                 resp_text = await response.text()
                 _LOGGER.debug("Full stations response: %s", resp_text)
@@ -234,16 +334,10 @@ class HoymilesAPI:
 
     async def get_microinverters_by_stations(self, station_id: str) -> Dict[str, str]:
         """Get all microinverters with detail for a station."""
-        if not self._token:
+        if not self._token or self.is_token_expired():
             _LOGGER.debug("No token available, authenticating first")
             await self.authenticate()
-            
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": self._token,
-        }
-        
+
         data = {
             "sid": int(station_id),
             "page_size": 1000,
@@ -254,7 +348,7 @@ class HoymilesAPI:
         try:
             _LOGGER.debug("Sending request to get microinverters with token: %s...", self._token[:20] if self._token else "None")
             async with self._session.post(
-                API_MICROINVERTERS_URL, headers=headers, json=data
+                API_MICROINVERTERS_URL, headers=self._auth_headers(), json=data
             ) as response:
                 resp_text = await response.text()
                 _LOGGER.debug("Full microinverters response: %s", resp_text)
@@ -280,7 +374,7 @@ class HoymilesAPI:
                         try:
                             _LOGGER.debug("Sending request to get microinverters detail with token: %s...", self._token[:20] if self._token else "None")
                             async with self._session.post(
-                                API_MICRO_DETAIL_URL, headers=headers, json=data
+                                API_MICRO_DETAIL_URL, headers=self._auth_headers(), json=data
                             ) as response:
                                 resp_text = await response.text()
                                 _LOGGER.debug("Full microinverter %s single detail response: %s", microinverter_id, resp_text)
@@ -325,22 +419,16 @@ class HoymilesAPI:
 
     async def get_real_time_data(self, station_id: str) -> Dict[str, Any]:
         """Get real-time data for a station."""
-        if not self._token:
+        if not self._token or self.is_token_expired():
             await self.authenticate()
-            
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": self._token,
-        }
-        
+
         data = {
             "sid": int(station_id),
         }
         
         try:
             async with self._session.post(
-                API_REAL_TIME_DATA_URL, headers=headers, json=data
+                API_REAL_TIME_DATA_URL, headers=self._auth_headers(), json=data
             ) as response:
                 # Log raw text to better diagnose field availability across accounts/devices
                 resp_text = await response.text()
@@ -366,15 +454,9 @@ class HoymilesAPI:
 
     async def get_pv_indicators(self, station_id: str) -> Dict[str, Any]:
         """Get PV indicators data for a station."""
-        if not self._token:
+        if not self._token or self.is_token_expired():
             await self.authenticate()
-            
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": self._token,
-        }
-        
+
         data = {
             "sid": int(station_id),
             "type": 4  # PV indicators type
@@ -382,7 +464,7 @@ class HoymilesAPI:
         
         try:
             async with self._session.post(
-                API_PV_INDICATORS_URL, headers=headers, json=data
+                API_PV_INDICATORS_URL, headers=self._auth_headers(), json=data
             ) as response:
                 resp = await response.json()
                 
@@ -404,12 +486,6 @@ class HoymilesAPI:
         if self.is_token_expired():
             await self.authenticate()
 
-        # The Authorization header must be just the token, no Bearer prefix
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": self._token,
-        }
-        
         # The request needs to be specifically id as a string
         status_data = {
             "id": station_id
@@ -421,7 +497,7 @@ class HoymilesAPI:
         try:
             status_response = await self._session.post(
                 API_BATTERY_SETTINGS_STATUS_URL,
-                headers=headers,
+                headers=self._auth_headers(include_accept=False),
                 json=status_data,
             )
             resp_text = await status_response.text()
@@ -507,14 +583,8 @@ class HoymilesAPI:
             _LOGGER.error("Invalid battery mode: %s", mode)
             return False
             
-        if not self._token:
+        if not self._token or self.is_token_expired():
             await self.authenticate()
-            
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": self._token,
-        }
         
         # Prepare mode data with nested structure
         mode_data = {
@@ -581,7 +651,7 @@ class HoymilesAPI:
         
         try:
             async with self._session.post(
-                API_BATTERY_SETTINGS_WRITE_URL, headers=headers, json=data
+                API_BATTERY_SETTINGS_WRITE_URL, headers=self._auth_headers(), json=data
             ) as response:
                 resp_text = await response.text()
                 _LOGGER.debug("Set battery mode response: %s", resp_text)
@@ -614,9 +684,9 @@ class HoymilesAPI:
             _LOGGER.error("Invalid reserve SOC value: %s", reserve_soc)
             return False
             
-        if not self._token:
+        if not self._token or self.is_token_expired():
             await self.authenticate()
-            
+
         _LOGGER.debug("=== START SOC UPDATE OPERATION FOR %s%% ===", reserve_soc)
         
         # First get current settings to maintain the mode
@@ -633,12 +703,6 @@ class HoymilesAPI:
             # Default to Self Consumption mode
             current_mode = BATTERY_MODE_SELF_CONSUMPTION
             
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": self._token,
-        }
-        
         # Based on the API capture, we should use the nested structure:
         # {mode:1, data:{reserve_soc:50}}
         mode_data = {
@@ -670,7 +734,7 @@ class HoymilesAPI:
         
         try:
             async with self._session.post(
-                API_BATTERY_SETTINGS_WRITE_URL, headers=headers, json=data
+                API_BATTERY_SETTINGS_WRITE_URL, headers=self._auth_headers(), json=data
             ) as response:
                 resp_text = await response.text()
                 _LOGGER.debug("SOC update - Response: %s", resp_text)

@@ -54,6 +54,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Test authentication
                 authenticated = await api.authenticate()
                 if not authenticated:
+                    _LOGGER.error(
+                        "Hoymiles authentication rejected: %s - %s",
+                        api.last_auth_status,
+                        api.last_auth_message,
+                    )
                     errors["base"] = "invalid_auth"
                     return self.async_show_form(
                         step_id="user",
