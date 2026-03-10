@@ -13,7 +13,10 @@
     "error": {
       "cannot_connect": "Failed to connect to Hoymiles Cloud",
       "invalid_auth": "Invalid authentication",
+      "app_update_required": "Hoymiles rejected the login because the client version is too old",
+      "s_miles_home_required": "This account appears to require a different Hoymiles login type (for example S-Miles Home)",
       "no_stations": "No stations found for this account",
+      "no_accessible_stations": "Authentication succeeded, but no accessible stations were returned for this account",
       "unknown": "Unexpected error"
     },
     "abort": {

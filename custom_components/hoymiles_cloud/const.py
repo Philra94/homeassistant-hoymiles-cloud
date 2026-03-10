@@ -21,6 +21,19 @@ API_BATTERY_SETTINGS_READ_URL = f"{API_BASE_URL}/pvm-ctl/api/0/dev/setting/read"
 API_BATTERY_SETTINGS_WRITE_URL = f"{API_BASE_URL}/pvm-ctl/api/0/dev/setting/write"
 API_BATTERY_SETTINGS_STATUS_URL = f"{API_BASE_URL}/pvm-ctl/api/0/dev/setting/status"
 
+# Authentication modes / client profiles
+AUTH_MODE_AUTO = "auto"
+AUTH_MODE_WEB_V3 = "web_v3"
+AUTH_MODE_MOBILE_V3 = "mobile_v3"
+AUTH_MODE_LEGACY_V0 = "legacy_v0"
+
+CLIENT_PROFILE_WEB = "web"
+CLIENT_PROFILE_MOBILE = "mobile"
+
+DEFAULT_MOBILE_APP_VERSION = "3.7.0"
+DEFAULT_WEB_USER_AGENT = "HomeAssistant-HoymilesCloud"
+DEFAULT_MOBILE_USER_AGENT = "S-Miles Home"
+
 # Battery Modes
 BATTERY_MODE_SELF_CONSUMPTION = 1
 BATTERY_MODE_TIME_OF_USE = 8

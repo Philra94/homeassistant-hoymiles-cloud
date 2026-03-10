@@ -11,20 +11,23 @@ This custom integration for Home Assistant allows you to monitor and control you
   - Grid power import/export
   - Load power consumption
   - Daily and total energy generation
+  - Dynamic PV channel discovery based on the indicators returned by the account
+  - Reported inverter count and battery settings access diagnostics
   
 - **Control Functions:**
-  - Set battery operation mode (Self-Consumption, Economy, Backup, Off-Grid, Peak Shaving, Time of Use)
-  - Configure battery reserve state of charge
-  - Peak Shaving Mode specific settings (max_soc, meter_power)
+  - Set battery operation mode when the account exposes writable battery settings
+  - Configure battery reserve state of charge for the modes returned by the account
+  - Peak Shaving Mode specific settings (`max_soc`, `meter_power`) when supported
 
 ## Development Status
 
-This is the first version of the integration, with focus on:
-- Reading basic data from Hoymiles inverters
-- Setting the battery mode
-- Configuring the self-consumption SOC and other basic parameters
+This integration focuses on safe production use:
+- Read-only telemetry should still work even if the account cannot access battery settings
+- Controls are only exposed when the Hoymiles account returns writable settings data
+- Station discovery supports accounts with more than one page of stations
+- Authentication now preserves more specific Hoymiles failure reasons instead of flattening them into a generic login error
 
-Not all available sensors and settings are implemented yet, and additional functionality is still being worked on. This integration is a work in progress and will be expanded in future updates.
+Not all available Hoymiles API fields are exposed as entities yet, but unsupported or permission-denied controls should now stay out of Home Assistant instead of showing misleading defaults.
 
 ## Installation
 
@@ -51,20 +54,31 @@ Not all available sensors and settings are implemented yet, and additional funct
 3. Enter your Hoymiles Cloud login credentials (same as used in the S-Miles Cloud app/website)
 4. Click "Submit"
 
+The integration currently auto-tries multiple authentication strategies:
+- browser-compatible v3 login
+- a mobile-profile v3 retry with app-version metadata
+- legacy v0 login fallback
+
+If Hoymiles rejects an account with a more specific message, the config flow should now surface that reason instead of only showing a generic authentication failure.
+
 ## Usage
 
 After configuration, the integration will create:
 
 - A device for each Hoymiles station with sensors for power, energy, and battery levels
-- Controls for battery mode and reserve capacity settings
+- Controls for battery mode and reserve capacity settings only when the account exposes writable battery settings
+
+The integration creates PV input sensors from the indicator keys returned by the API. If a system has more than two PV inputs and Hoymiles exposes them in the indicators payload, matching Home Assistant sensors will be created automatically.
 
 The sensors will update every minute by default, but this can be changed in the integration options.
 
 ## Notes
 
-- Password encryption/hashing is simplified in this version. For production use, it should be properly implemented according to the actual encryption method used by Hoymiles.
-- Error handling is basic. The integration will log errors but may not handle all error cases gracefully.
-- API endpoints and data structures are based on the observed behavior of the official Hoymiles Cloud API as of 2023-2024.
+- The integration uses the modern Hoymiles v3 authentication flow with the observed browser-compatible hashing fallback.
+- Some accounts appear to require a different Hoymiles client/account family. If Hoymiles responds with messages like `Can only login to the S-Miles Home.` or `Your app version is low. Please update to the latest version.`, the integration now exposes those outcomes more clearly in the config flow and logs.
+- Some accounts expose live battery telemetry but deny access to battery settings. In that case the integration keeps the telemetry sensors and hides the unsupported controls.
+- Custom Time-of-Use schedule editing is not exposed right now. The previous custom schedule service path was removed because it was not reliably aligned with live API permissions and payload shapes.
+- API endpoints and payload structures are based on observed Hoymiles Cloud behavior and may still vary by region, account role, and hardware family.
 
 ## Contributing
 
@@ -79,6 +93,7 @@ Please note that this code was developed with the assistance of AI, which may ex
 
 - Check Home Assistant logs for details about any errors
 - Verify your Hoymiles Cloud credentials
+- If setup fails, note the exact Hoymiles message shown in the logs or config flow. Messages about `S-Miles Home` or app version requirements usually indicate an account/client compatibility issue rather than a wrong password.
 - Ensure your Home Assistant instance has internet access to reach the Hoymiles Cloud API
 
 ## Support

@@ -1,0 +1,12 @@
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: homeassistant-hoymiles-test
+    restart: unless-stopped
+    ports:
+      - "8123:8123"
+    environment:
+      TZ: Europe/Berlin
+    volumes:
+      - ./config:/config
+      - ../../custom_components:/config/custom_components:ro

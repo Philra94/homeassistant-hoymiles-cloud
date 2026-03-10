@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live verifier for the Hoymiles browser-style login flow.
+"""Live verifier for the Hoymiles authentication flows.
 
 This script uses the integration's real API client without importing the
 Home Assistant package. Provide credentials via CLI args or environment
@@ -45,6 +45,7 @@ def load_api_class():
     sys.modules[PACKAGE_NAME] = package
 
     _load_module(f"{PACKAGE_NAME}.const", INTEGRATION_ROOT / "const.py")
+    _load_module(f"{PACKAGE_NAME}.auth", INTEGRATION_ROOT / "auth.py")
     api_module = _load_module(
         f"{PACKAGE_NAME}.hoymiles_api",
         INTEGRATION_ROOT / "hoymiles_api.py",
@@ -55,7 +56,7 @@ def load_api_class():
 def build_parser() -> argparse.ArgumentParser:
     """Create the CLI parser."""
     parser = argparse.ArgumentParser(
-        description="Test the browser-matched Hoymiles login flow."
+        description="Test Hoymiles authentication flows."
     )
     parser.add_argument(
         "--username",
@@ -76,6 +77,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-stations",
         action="store_true",
         help="Skip the post-login station list validation step.",
+    )
+    parser.add_argument(
+        "--auth-mode",
+        default="auto",
+        choices=("auto", "web_v3", "mobile_v3", "legacy_v0"),
+        help="Authentication strategy to test. Defaults to auto.",
+    )
+    parser.add_argument(
+        "--mobile-app-version",
+        default=None,
+        help="Override the mobile client version used for mobile-profile auth attempts.",
     )
     return parser
 
@@ -127,16 +139,21 @@ async def main() -> int:
     username, password = resolve_credentials(args)
     HoymilesAPI = load_api_class()
 
-    print("Testing Hoymiles browser-style login flow...")
+    print("Testing Hoymiles authentication flow...")
     print(f"Username: {username}")
+    print(f"Auth mode: {args.auth_mode}")
 
     async with aiohttp.ClientSession() as session:
         api = HoymilesAPI(session, username, password)
-        authenticated = await api.authenticate()
+        if args.mobile_app_version:
+            api._mobile_app_version = args.mobile_app_version
+        authenticated = await api.authenticate(auth_mode=args.auth_mode)
 
         if not authenticated:
             print("Authentication: FAILED")
+            print(f"Last strategy: {api.last_auth_attempt or '<none>'}")
             print(f"Last method: {api.auth_method or '<none>'}")
+            print(f"Error key: {api.last_auth_error_key or '<none>'}")
             print(f"API status: {api.last_auth_status or '<none>'}")
             print(f"API message: {api.last_auth_message or '<none>'}")
             return 1

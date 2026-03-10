@@ -1,14 +1,16 @@
 """API client for Hoymiles Cloud."""
 import asyncio
 import base64
-import logging
-import time
+from copy import deepcopy
 import hashlib
 import json
-from typing import Any, Dict, List, Optional
+import logging
+import time
+from typing import Any, Dict, Optional
 
 import aiohttp
 
+from .auth import AuthAttempt, choose_preferred_failure
 from .const import (
     API_AUTH_URL,
     API_AUTH_PRE_INSP_URL,
@@ -26,9 +28,34 @@ from .const import (
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_MODE_BACKUP,
     BATTERY_MODES,
+    AUTH_MODE_AUTO,
+    AUTH_MODE_LEGACY_V0,
+    AUTH_MODE_MOBILE_V3,
+    AUTH_MODE_WEB_V3,
+    CLIENT_PROFILE_MOBILE,
+    CLIENT_PROFILE_WEB,
+    DEFAULT_MOBILE_APP_VERSION,
+    DEFAULT_MOBILE_USER_AGENT,
+    DEFAULT_WEB_USER_AGENT,
+)
+from .data import (
+    MODE_KEY_MAPPING,
+    battery_settings_readable,
+    build_empty_battery_settings,
+    get_mode_settings,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+DEFAULT_MODE_SETTINGS: dict[int, dict[str, Any]] = {
+    BATTERY_MODE_SELF_CONSUMPTION: {"reserve_soc": 10},
+    2: {"reserve_soc": 0, "money_code": "$", "date": []},
+    BATTERY_MODE_BACKUP: {"reserve_soc": 100},
+    4: {},
+    7: {"reserve_soc": 30, "max_soc": 70, "meter_power": 3000},
+    BATTERY_MODE_TIME_OF_USE: {"reserve_soc": 10},
+}
 
 
 class HoymilesAPI:
@@ -47,6 +74,10 @@ class HoymilesAPI:
         self._auth_method: Optional[str] = None
         self._last_auth_status: Optional[str] = None
         self._last_auth_message: Optional[str] = None
+        self._last_auth_error_key: Optional[str] = None
+        self._last_auth_attempt: Optional[str] = None
+        self._last_auth_attempts: list[AuthAttempt] = []
+        self._mobile_app_version = DEFAULT_MOBILE_APP_VERSION
 
     def is_token_expired(self) -> bool:
         """Check if the token is expired."""
@@ -67,6 +98,16 @@ class HoymilesAPI:
         """Return the last authentication error message."""
         return self._last_auth_message
 
+    @property
+    def last_auth_error_key(self) -> Optional[str]:
+        """Return the normalized last authentication error key."""
+        return self._last_auth_error_key
+
+    @property
+    def last_auth_attempt(self) -> Optional[str]:
+        """Return the last attempted authentication strategy."""
+        return self._last_auth_attempt
+
     def _set_auth_failure(self, status: Optional[str], message: Optional[str]) -> None:
         """Store the most recent authentication failure."""
         self._last_auth_status = str(status) if status is not None else None
@@ -77,14 +118,30 @@ class HoymilesAPI:
         self._token = token
         self._token_expires_at = time.time() + self._token_valid_time
         self._auth_method = method
+        self._last_auth_attempt = method
         self._last_auth_status = None
         self._last_auth_message = None
+        self._last_auth_error_key = None
 
-    def _json_headers(self, *, include_accept: bool = True) -> Dict[str, str]:
+    def _json_headers(
+        self,
+        *,
+        include_accept: bool = True,
+        client_profile: str = CLIENT_PROFILE_WEB,
+        app_version: str | None = None,
+    ) -> Dict[str, str]:
         """Build JSON request headers."""
         headers = {"Content-Type": "application/json"}
         if include_accept:
             headers["Accept"] = "application/json"
+        if client_profile == CLIENT_PROFILE_MOBILE:
+            version = app_version or self._mobile_app_version
+            headers["User-Agent"] = f"{DEFAULT_MOBILE_USER_AGENT}/{version}"
+            headers["App-Version"] = version
+            headers["X-App-Version"] = version
+            headers["X-Client-Type"] = CLIENT_PROFILE_MOBILE
+        else:
+            headers["User-Agent"] = DEFAULT_WEB_USER_AGENT
         return headers
 
     def _auth_headers(self, *, include_accept: bool = True) -> Dict[str, str]:
@@ -95,7 +152,20 @@ class HoymilesAPI:
             headers["Authorization"] = self._token
         return headers
 
-    async def _authenticate_argon2(self) -> bool:
+    def _record_auth_failure(self, attempt: AuthAttempt) -> AuthAttempt:
+        """Persist a failed auth attempt."""
+        self._last_auth_attempt = attempt.method
+        self._last_auth_status = attempt.status
+        self._last_auth_message = attempt.message
+        self._last_auth_error_key = attempt.error_key
+        return attempt
+
+    def _record_auth_success(self, attempt: AuthAttempt) -> bool:
+        """Persist a successful auth attempt."""
+        self._set_auth_success(attempt.method, attempt.token)
+        return True
+
+    async def _authenticate_v3(self, *, client_profile: str) -> AuthAttempt:
         """Authenticate using the modern browser flow (API v3).
 
         The web app always starts with ``/iam/pub/3/auth/pre-insp`` and then
@@ -122,7 +192,10 @@ class HoymilesAPI:
         except ImportError:
             _LOGGER.debug("argon2-cffi not available, will only use unsalted v3 auth")
 
-        headers = self._json_headers()
+        headers = self._json_headers(client_profile=client_profile)
+        method_name = (
+            AUTH_MODE_MOBILE_V3 if client_profile == CLIENT_PROFILE_MOBILE else AUTH_MODE_WEB_V3
+        )
 
         # Step 1: Pre-inspection — get server-provided salt and nonce
         try:
@@ -134,34 +207,51 @@ class HoymilesAPI:
                 pre_resp = await response.json()
         except Exception as e:
             _LOGGER.debug("Argon2 pre-inspection request failed: %s", e)
-            return False
+            return self._record_auth_failure(
+                AuthAttempt(
+                    method=method_name,
+                    client_profile=client_profile,
+                    success=False,
+                    message=str(e),
+                )
+            )
 
         if pre_resp.get("status") != "0":
-            self._set_auth_failure(pre_resp.get("status"), pre_resp.get("message"))
-            _LOGGER.debug(
-                "Argon2 pre-inspection rejected: %s - %s",
-                pre_resp.get("status"),
-                pre_resp.get("message"),
+            return self._record_auth_failure(
+                AuthAttempt(
+                    method=method_name,
+                    client_profile=client_profile,
+                    success=False,
+                    status=str(pre_resp.get("status")) if pre_resp.get("status") is not None else None,
+                    message=pre_resp.get("message"),
+                )
             )
-            return False
 
         pre_data = pre_resp.get("data", {})
         salt_b64 = pre_data.get("a")
         nonce = pre_data.get("n")
         if not nonce:
-            self._set_auth_failure(None, "Argon2 pre-inspection returned incomplete data")
-            _LOGGER.debug("Argon2 pre-inspection returned incomplete data: %s", pre_data)
-            return False
+            return self._record_auth_failure(
+                AuthAttempt(
+                    method=method_name,
+                    client_profile=client_profile,
+                    success=False,
+                    message="Argon2 pre-inspection returned incomplete data",
+                )
+            )
 
         # Step 2: Build the browser-style credential hash for the returned variant.
         try:
             if salt_b64:
                 if hash_secret_raw is None or Type is None:
-                    self._set_auth_failure(
-                        None,
-                        "Argon2 support is unavailable for salted v3 authentication",
+                    return self._record_auth_failure(
+                        AuthAttempt(
+                            method=method_name,
+                            client_profile=client_profile,
+                            success=False,
+                            message="Argon2 support is unavailable for salted v3 authentication",
+                        )
                     )
-                    return False
 
                 salt = base64.b64decode(salt_b64)
                 raw_hash = hash_secret_raw(
@@ -182,7 +272,14 @@ class HoymilesAPI:
                 auth_method = "sha256_v3"
         except Exception as e:
             _LOGGER.debug("Modern v3 hashing failed: %s", e)
-            return False
+            return self._record_auth_failure(
+                AuthAttempt(
+                    method=method_name,
+                    client_profile=client_profile,
+                    success=False,
+                    message=str(e),
+                )
+            )
 
         # Step 3: Login with Argon2 credentials
         try:
@@ -194,24 +291,36 @@ class HoymilesAPI:
                 resp = await response.json()
         except Exception as e:
             _LOGGER.debug("Argon2 login request failed: %s", e)
-            return False
+            return self._record_auth_failure(
+                AuthAttempt(
+                    method=method_name,
+                    client_profile=client_profile,
+                    success=False,
+                    message=str(e),
+                )
+            )
 
         if resp.get("status") == "0" and resp.get("message") == "success":
-            self._set_auth_success(auth_method, resp.get("data", {}).get("token"))
-            _LOGGER.debug("Modern v3 authentication succeeded via %s", auth_method)
-            return True
+            return AuthAttempt(
+                method=auth_method,
+                client_profile=client_profile,
+                success=True,
+                token=resp.get("data", {}).get("token"),
+            )
 
-        self._set_auth_failure(resp.get("status"), resp.get("message"))
-        _LOGGER.debug(
-            "Argon2 authentication failed: %s - %s",
-            resp.get("status"),
-            resp.get("message"),
+        return self._record_auth_failure(
+            AuthAttempt(
+                method=method_name,
+                client_profile=client_profile,
+                success=False,
+                status=str(resp.get("status")) if resp.get("status") is not None else None,
+                message=resp.get("message"),
+            )
         )
-        return False
 
-    async def _authenticate_legacy(self) -> bool:
+    async def _authenticate_legacy(self) -> AuthAttempt:
         """Authenticate using the legacy MD5 flow (API v0)."""
-        headers = self._json_headers()
+        headers = self._json_headers(client_profile=CLIENT_PROFILE_WEB)
         md5_password = hashlib.md5(self._password.encode()).hexdigest()
         data = {
             "user_name": self._username,
@@ -224,35 +333,69 @@ class HoymilesAPI:
                 resp = await response.json()
         except Exception as e:
             _LOGGER.debug("Legacy authentication request failed: %s", e)
-            return False
+            return self._record_auth_failure(
+                AuthAttempt(
+                    method=AUTH_MODE_LEGACY_V0,
+                    client_profile=CLIENT_PROFILE_WEB,
+                    success=False,
+                    message=str(e),
+                )
+            )
 
         if resp.get("status") == "0" and resp.get("message") == "success":
-            self._set_auth_success("legacy_md5_v0", resp.get("data", {}).get("token"))
-            _LOGGER.debug("Legacy MD5 authentication succeeded")
-            return True
+            return AuthAttempt(
+                method=AUTH_MODE_LEGACY_V0,
+                client_profile=CLIENT_PROFILE_WEB,
+                success=True,
+                token=resp.get("data", {}).get("token"),
+            )
 
-        self._set_auth_failure(resp.get("status"), resp.get("message"))
-        _LOGGER.error(
-            "Authentication failed: %s - %s",
-            resp.get("status"),
-            resp.get("message"),
+        return self._record_auth_failure(
+            AuthAttempt(
+                method=AUTH_MODE_LEGACY_V0,
+                client_profile=CLIENT_PROFILE_WEB,
+                success=False,
+                status=str(resp.get("status")) if resp.get("status") is not None else None,
+                message=resp.get("message"),
+            )
         )
-        return False
 
-    async def authenticate(self) -> bool:
+    async def authenticate(self, auth_mode: str = AUTH_MODE_AUTO) -> bool:
         """Authenticate with the Hoymiles API.
 
-        Tries the modern Argon2 v3 endpoint first, then falls back to
-        the legacy MD5 v0 endpoint if Argon2 is unavailable or rejected.
+        Tries supported auth strategies while preserving the most informative
+        failure if all strategies fail.
         """
         try:
             self._auth_method = None
             self._last_auth_status = None
             self._last_auth_message = None
-            if await self._authenticate_argon2():
-                return True
-            _LOGGER.debug("Argon2 auth failed or unavailable, trying legacy MD5 auth")
-            return await self._authenticate_legacy()
+            self._last_auth_error_key = None
+            self._last_auth_attempt = None
+            self._last_auth_attempts = []
+
+            if auth_mode == AUTH_MODE_WEB_V3:
+                attempts = [await self._authenticate_v3(client_profile=CLIENT_PROFILE_WEB)]
+            elif auth_mode == AUTH_MODE_MOBILE_V3:
+                attempts = [await self._authenticate_v3(client_profile=CLIENT_PROFILE_MOBILE)]
+            elif auth_mode == AUTH_MODE_LEGACY_V0:
+                attempts = [await self._authenticate_legacy()]
+            else:
+                attempts = [
+                    await self._authenticate_v3(client_profile=CLIENT_PROFILE_WEB),
+                    await self._authenticate_v3(client_profile=CLIENT_PROFILE_MOBILE),
+                    await self._authenticate_legacy(),
+                ]
+
+            self._last_auth_attempts = attempts
+            for attempt in attempts:
+                if attempt.success:
+                    return self._record_auth_success(attempt)
+
+            preferred_failure = choose_preferred_failure(attempts)
+            if preferred_failure is not None:
+                self._record_auth_failure(preferred_failure)
+            return False
         except Exception as e:
             _LOGGER.error("Error during authentication: %s", e)
             raise
@@ -290,44 +433,57 @@ class HoymilesAPI:
             _LOGGER.debug("No token available, authenticating first")
             await self.authenticate()
 
-        data = {
-            "page_size": 10,
-            "page_num": 1,
-        }
-        
+        stations: Dict[str, str] = {}
+        page_num = 1
+        page_size = 100
+        total = None
+
         try:
-            _LOGGER.debug("Sending request to get stations with token: %s...", self._token[:20] if self._token else "None")
-            async with self._session.post(
-                API_STATIONS_URL, headers=self._auth_headers(), json=data
-            ) as response:
-                resp_text = await response.text()
-                _LOGGER.debug("Full stations response: %s", resp_text)
-                
-                resp = json.loads(resp_text)
-                
-                if resp.get("status") == "0" and resp.get("message") == "success":
-                    stations = {}
-                    stations_data = resp.get("data", {}).get("list", [])
-                    _LOGGER.debug("Raw stations data: %s", stations_data)
-                    
-                    if not stations_data:
-                        _LOGGER.warning("API returned success but stations list is empty")
-                        
-                    for station in stations_data:
-                        station_id = str(station.get("id"))
-                        station_name = station.get("name")
-                        _LOGGER.debug("Adding station: %s - %s", station_id, station_name)
-                        stations[station_id] = station_name
-                        
-                    _LOGGER.debug("Returning stations dictionary: %s", stations)
-                    return stations
-                else:
+            while True:
+                data = {
+                    "page_size": page_size,
+                    "page_num": page_num,
+                }
+                async with self._session.post(
+                    API_STATIONS_URL, headers=self._auth_headers(), json=data
+                ) as response:
+                    resp_text = await response.text()
+                    _LOGGER.debug("Stations response page %s: %s", page_num, resp_text)
+                    resp = json.loads(resp_text)
+
+                if resp.get("status") != "0" or resp.get("message") != "success":
                     _LOGGER.error(
-                        "Failed to get stations: %s - %s", 
-                        resp.get("status"), 
-                        resp.get("message")
+                        "Failed to get stations: %s - %s",
+                        resp.get("status"),
+                        resp.get("message"),
                     )
                     return {}
+
+                payload = resp.get("data", {})
+                stations_data = payload.get("list", [])
+                total = payload.get("total", total)
+
+                if not stations_data and page_num == 1:
+                    _LOGGER.warning("API returned success but stations list is empty")
+
+                for station in stations_data:
+                    station_id = str(station.get("id"))
+                    station_name = station.get("name") or f"Station {station_id}"
+                    stations[station_id] = station_name
+
+                if not stations_data:
+                    break
+
+                if total is not None:
+                    if len(stations) >= int(total):
+                        break
+                elif len(stations_data) < page_size:
+                    break
+
+                page_num += 1
+
+            _LOGGER.debug("Returning stations dictionary: %s", stations)
+            return stations
         except Exception as e:
             _LOGGER.error("Error getting stations: %s", e)
             raise
@@ -491,7 +647,11 @@ class HoymilesAPI:
             "id": station_id
         }
         
-        _LOGGER.debug("Requesting battery settings for station %s with data: %s", station_id, json.dumps(status_data))
+        _LOGGER.debug(
+            "Requesting battery settings for station %s with data: %s",
+            station_id,
+            json.dumps(status_data),
+        )
         
         # First, check the status of settings to see if they're available
         try:
@@ -515,56 +675,40 @@ class HoymilesAPI:
                     
                     _LOGGER.debug("Successfully received battery settings")
                     
-                    # Extract mode data from the response
                     mode_data = status_data["data"]["data"].get("data", {})
                     current_mode = status_data["data"]["data"].get("mode", 1)
-                    
-                    # Create result structure with full mode data
-                    result = {
-                        "data": {
-                            "mode": current_mode,
-                        },
-                        "mode_data": mode_data  # Store the full mode data for access to all k_* values
-                    }
-                    
-                    # Add reserve_soc for current mode to the main data
-                    # Map mode IDs to their respective keys in the API response
-                    mode_key_mapping = {
-                        1: "k_1",  # Self-Consumption Mode
-                        2: "k_2",  # Economy Mode
-                        3: "k_3",  # Backup Mode
-                        4: "k_4",  # Off-Grid Mode
-                        7: "k_7",  # Peak Shaving Mode
-                        8: "k_8",  # Time of Use Mode
-                    }
-                    
-                    # Get the current mode key (k_1, k_2, etc.)
-                    current_mode_key = mode_key_mapping.get(current_mode)
-                    
-                    # If we have settings for the current mode, extract reserve_soc
+                    current_mode_key = MODE_KEY_MAPPING.get(current_mode)
+
+                    result = build_empty_battery_settings(readable=True, writable=True)
+                    result["data"] = {"mode": current_mode}
+                    result["mode_data"] = mode_data
+                    result["available_modes"] = []
+
                     if current_mode_key and current_mode_key in mode_data:
-                        result["data"]["reserve_soc"] = mode_data[current_mode_key].get("reserve_soc", 20)
-                    
-                    # Add a direct mapping of mode constants to their settings for easier access
-                    result["mode_settings"] = {}
-                    
-                    # Add all mode settings to result
-                    for mode_id, k_mode in mode_key_mapping.items():
+                        result["data"]["reserve_soc"] = mode_data[current_mode_key].get(
+                            "reserve_soc"
+                        )
+
+                    for mode_id, k_mode in MODE_KEY_MAPPING.items():
                         if k_mode in mode_data:
-                            result["mode_settings"][mode_id] = {
-                                "reserve_soc": mode_data[k_mode].get("reserve_soc", 20)
-                            }
-                    
+                            result["available_modes"].append(mode_id)
+                            result["mode_settings"][mode_id] = deepcopy(mode_data[k_mode])
+
                     _LOGGER.debug("Parsed battery settings: %s", json.dumps(result, indent=2))
                     return result
                 
                 # Check for specific error messages
                 if status_data.get("status") != "0":
-                    # Handle "No Permission" error gracefully - this typically means no battery is connected
-                    if status_data.get("status") == "3" and "No Permission" in str(status_data.get("message", "")):
-                        _LOGGER.info("No battery detected for station %s (API error 3 - No Permission). Using default settings.", station_id)
-                    else:
-                        _LOGGER.error("API error: %s - %s", status_data.get("status"), status_data.get("message"))
+                    _LOGGER.info(
+                        "Battery settings unavailable for station %s: %s - %s",
+                        station_id,
+                        status_data.get("status"),
+                        status_data.get("message"),
+                    )
+                    return build_empty_battery_settings(
+                        status=str(status_data.get("status")),
+                        message=str(status_data.get("message")),
+                    )
                 
             except json.JSONDecodeError as e:
                 _LOGGER.warning("Error decoding status response JSON: %s", e)
@@ -572,9 +716,86 @@ class HoymilesAPI:
         except Exception as e:
             _LOGGER.warning("Error checking battery settings status: %s", e)
         
-        # If we can't get the settings, return a default value
-        _LOGGER.debug("Could not retrieve battery settings for station %s (likely no battery connected), using defaults", station_id)
-        return {"data": {"mode": 1, "reserve_soc": 20}}
+        return build_empty_battery_settings(message="Unable to read battery settings")
+
+    def _default_mode_settings(self, mode: int) -> dict[str, Any]:
+        """Return default settings for a battery mode."""
+        return deepcopy(DEFAULT_MODE_SETTINGS.get(mode, {}))
+
+    async def _write_battery_mode_payload(
+        self, station_id: str, mode: int, mode_settings: dict[str, Any]
+    ) -> bool:
+        """Write a full mode payload to the battery settings endpoint."""
+        if not self._token or self.is_token_expired():
+            await self.authenticate()
+
+        data = {
+            "action": 1013,
+            "data": {
+                "sid": int(station_id),
+                "data": {
+                    "mode": mode,
+                    "data": mode_settings,
+                },
+            },
+        }
+
+        _LOGGER.debug(
+            "Writing battery mode payload for mode %s: %s",
+            mode,
+            json.dumps(data, indent=2),
+        )
+
+        try:
+            async with self._session.post(
+                API_BATTERY_SETTINGS_WRITE_URL,
+                headers=self._auth_headers(),
+                json=data,
+            ) as response:
+                resp_text = await response.text()
+                _LOGGER.debug("Battery settings write response: %s", resp_text)
+                resp = json.loads(resp_text)
+        except json.JSONDecodeError as e:
+            _LOGGER.error("Error decoding battery settings response: %s", e)
+            return False
+        except Exception as e:
+            _LOGGER.error("Error writing battery settings: %s", e)
+            raise
+
+        if resp.get("status") == "0" and resp.get("message") == "success":
+            _LOGGER.info(
+                "Successfully updated battery settings for mode %s on station %s",
+                mode,
+                station_id,
+            )
+            return True
+
+        _LOGGER.error(
+            "Failed to write battery settings: %s - %s",
+            resp.get("status"),
+            resp.get("message"),
+        )
+        return False
+
+    async def _get_writable_mode_settings(
+        self, station_id: str, mode: int
+    ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        """Return current settings and a writable payload for a mode."""
+        current_settings = await self.get_battery_settings(station_id)
+        if not battery_settings_readable(current_settings):
+            _LOGGER.warning(
+                "Battery settings are not readable for station %s; writes are disabled",
+                station_id,
+            )
+            return None, {}
+
+        mode_settings = get_mode_settings(current_settings, mode) or self._default_mode_settings(mode)
+
+        if mode == 2:
+            mode_settings.setdefault("money_code", "$")
+            mode_settings.setdefault("date", [])
+
+        return current_settings, mode_settings
 
     async def set_battery_mode(self, station_id: str, mode: int) -> bool:
         """Set battery mode for a station."""
@@ -582,195 +803,65 @@ class HoymilesAPI:
         if mode not in valid_modes:
             _LOGGER.error("Invalid battery mode: %s", mode)
             return False
-            
-        if not self._token or self.is_token_expired():
-            await self.authenticate()
-        
-        # Prepare mode data with nested structure
-        mode_data = {
-            "mode": mode,
-            "data": {}
-        }
-        
-        # Add mode-specific settings
-        if mode == 1:  # Self-Consumption Mode
-            # Default SOC for Self Consumption is 10%
-            mode_data["data"]["reserve_soc"] = 10
-            _LOGGER.debug("Setting Self-Consumption Mode with reserve_soc: 10")
-            
-        elif mode == 2:  # Economy Mode
-            # Economy mode needs minimum reserve_soc
-            mode_data["data"]["reserve_soc"] = 0
-            mode_data["data"]["money_code"] = "$"
-            mode_data["data"]["date"] = []
-            _LOGGER.debug("Setting Economy Mode with default settings")
-            
-        elif mode == 3:  # Backup Mode
-            # Backup mode typically uses a high reserve SOC (100%)
-            mode_data["data"]["reserve_soc"] = 100
-            _LOGGER.debug("Setting Backup Mode with reserve_soc: 100")
-            
-        elif mode == 4:  # Off-Grid Mode
-            # Off-Grid mode settings
-            mode_data["data"] = {}
-            _LOGGER.debug("Setting Off-Grid Mode with default settings")
-            
-        elif mode == 7:  # Peak Shaving Mode
-            # Peak Shaving Mode settings
-            mode_data["data"]["reserve_soc"] = 30
-            mode_data["data"]["max_soc"] = 70
-            mode_data["data"]["meter_power"] = 3000
-            _LOGGER.debug("Setting Peak Shaving Mode with reserve_soc: 30, max_soc: 70, meter_power: 3000")
-            
-        elif mode == 8:  # Time of Use Mode
-            # Do NOT send any time schedule – only change the mode
-            mode_data["data"]["reserve_soc"] = 10
-            _LOGGER.debug("Setting Time of Use Mode WITHOUT time schedule")
-        
-        # Try to preserve any existing settings for the mode we're switching to
-        try:
-            current_settings = await self.get_battery_settings(station_id)
-            if current_settings and "data" in current_settings:
-                # Only preserve settings if we have any
-                if "data" in current_settings.get("data", {}):
-                    _LOGGER.debug("Trying to preserve existing settings when changing mode")
-        except Exception as e:
-            _LOGGER.warning("Error checking current settings during mode change: %s", e)
-        
-        data = {
-            "action": 1013,
-            "data": {
-                "sid": int(station_id),
-                "data": mode_data
-            },
-        }
-        
-        _LOGGER.debug("Setting battery mode to %s with data: %s", mode, json.dumps(data, indent=2))
-        _LOGGER.info("API URL: %s", API_BATTERY_SETTINGS_WRITE_URL)
-        _LOGGER.info("Setting battery mode to %s for station ID: %s", BATTERY_MODES.get(mode), station_id)
-        
-        try:
-            async with self._session.post(
-                API_BATTERY_SETTINGS_WRITE_URL, headers=self._auth_headers(), json=data
-            ) as response:
-                resp_text = await response.text()
-                _LOGGER.debug("Set battery mode response: %s", resp_text)
-                
-                try:
-                    resp = json.loads(resp_text)
-                    
-                    if resp.get("status") == "0" and resp.get("message") == "success":
-                        request_id = resp.get("data")
-                        _LOGGER.info("Successfully set battery mode to %s (%s) (request ID: %s)", 
-                                    BATTERY_MODES.get(mode), mode, request_id)
-                        return True
-                    else:
-                        _LOGGER.error(
-                            "Failed to set battery mode: %s - %s", 
-                            resp.get("status"), 
-                            resp.get("message")
-                        )
-                        return False
-                except json.JSONDecodeError as e:
-                    _LOGGER.error("Error decoding battery mode response: %s, Raw response: %s", e, resp_text)
-                    return False
-        except Exception as e:
-            _LOGGER.error("Error setting battery mode: %s", e)
-            raise
+
+        _, mode_settings = await self._get_writable_mode_settings(station_id, mode)
+        if not mode_settings and mode not in DEFAULT_MODE_SETTINGS:
+            return False
+
+        _LOGGER.info(
+            "Setting battery mode to %s for station ID: %s",
+            BATTERY_MODES.get(mode),
+            station_id,
+        )
+        return await self._write_battery_mode_payload(station_id, mode, mode_settings)
 
     async def set_reserve_soc(self, station_id: str, reserve_soc: int) -> bool:
         """Set battery reserve SOC for a station."""
         if not 0 <= reserve_soc <= 100:
             _LOGGER.error("Invalid reserve SOC value: %s", reserve_soc)
             return False
-            
-        if not self._token or self.is_token_expired():
-            await self.authenticate()
 
-        _LOGGER.debug("=== START SOC UPDATE OPERATION FOR %s%% ===", reserve_soc)
-        
-        # First get current settings to maintain the mode
-        try:
-            current_settings = await self.get_battery_settings(station_id)
-            _LOGGER.debug("Current battery settings before update: %s", json.dumps(current_settings, indent=2))
-            # Default to Self Consumption mode if settings can't be retrieved
-            current_mode = BATTERY_MODE_SELF_CONSUMPTION
-            
-            if current_settings and "data" in current_settings:
-                current_mode = current_settings.get("data", {}).get("mode", BATTERY_MODE_SELF_CONSUMPTION)
-        except Exception as e:
-            _LOGGER.warning("Could not get current battery mode: %s", e)
-            # Default to Self Consumption mode
-            current_mode = BATTERY_MODE_SELF_CONSUMPTION
-            
-        # Based on the API capture, we should use the nested structure:
-        # {mode:1, data:{reserve_soc:50}}
-        mode_data = {
-            "mode": current_mode,
-            "data": {
-                "reserve_soc": reserve_soc
-            }
-        }
-        
-        # For Time of Use mode, we need to maintain the time periods
-        if current_mode == BATTERY_MODE_TIME_OF_USE:
-            try:
-                if current_settings and "data" in current_settings:
-                    time_periods = current_settings.get("data", {}).get("data", {}).get("time_periods", [])
-                    mode_data["data"]["time_periods"] = time_periods
-            except Exception:
-                # If we can't get time periods, just use an empty list as default
-                mode_data["data"]["time_periods"] = []
-        
-        data = {
-            "action": 1013,
-            "data": {
-                "sid": int(station_id),
-                "data": mode_data
-            },
-        }
-        
-        _LOGGER.debug("SOC update - Sending request with data: %s", json.dumps(data, indent=2))
-        
-        try:
-            async with self._session.post(
-                API_BATTERY_SETTINGS_WRITE_URL, headers=self._auth_headers(), json=data
-            ) as response:
-                resp_text = await response.text()
-                _LOGGER.debug("SOC update - Response: %s", resp_text)
-                
-                try:
-                    resp = json.loads(resp_text)
-                    
-                    if resp.get("status") == "0" and resp.get("message") == "success":
-                        request_id = resp.get("data")
-                        _LOGGER.info("Successfully sent battery SOC update to %s%% (request ID: %s)", reserve_soc, request_id)
-                        
-                        # Wait a moment for settings to be applied
-                        await asyncio.sleep(3)
-                        
-                        # Verify the change
-                        try:
-                            updated_settings = await self.get_battery_settings(station_id)
-                            _LOGGER.debug("Battery settings after update: %s", json.dumps(updated_settings, indent=2))
-                        except Exception as e:
-                            _LOGGER.warning("Could not verify SOC update: %s", e)
-                        
-                        _LOGGER.debug("=== END SOC UPDATE OPERATION ===")
-                        return True
-                    else:
-                        _LOGGER.error(
-                            "Failed to set reserve SOC: %s - %s", 
-                            resp.get("status"), 
-                            resp.get("message")
-                        )
-                        _LOGGER.debug("=== END SOC UPDATE OPERATION ===")
-                        return False
-                except json.JSONDecodeError as e:
-                    _LOGGER.error("Error decoding SOC response: %s, Raw response: %s", e, resp_text)
-                    _LOGGER.debug("=== END SOC UPDATE OPERATION ===")
-                    return False
-        except Exception as e:
-            _LOGGER.error("Error setting reserve SOC: %s", e)
-            _LOGGER.debug("=== END SOC UPDATE OPERATION ===")
-            raise 
+        current_settings = await self.get_battery_settings(station_id)
+        if not battery_settings_readable(current_settings):
+            _LOGGER.warning(
+                "Skipping reserve SOC update because settings are unavailable for station %s",
+                station_id,
+            )
+            return False
+
+        current_mode = current_settings.get("data", {}).get(
+            "mode", BATTERY_MODE_SELF_CONSUMPTION
+        )
+        mode_settings = get_mode_settings(current_settings, current_mode) or self._default_mode_settings(
+            current_mode
+        )
+        mode_settings["reserve_soc"] = reserve_soc
+
+        success = await self._write_battery_mode_payload(
+            station_id, current_mode, mode_settings
+        )
+        if success:
+            await asyncio.sleep(1)
+        return success
+
+    async def set_peak_shaving_settings(
+        self,
+        station_id: str,
+        *,
+        reserve_soc: int | None = None,
+        max_soc: int | None = None,
+        meter_power: int | None = None,
+    ) -> bool:
+        """Set Peak Shaving mode settings for a station."""
+        _, mode_settings = await self._get_writable_mode_settings(station_id, 7)
+        if not mode_settings:
+            return False
+
+        if reserve_soc is not None:
+            mode_settings["reserve_soc"] = reserve_soc
+        if max_soc is not None:
+            mode_settings["max_soc"] = max_soc
+        if meter_power is not None:
+            mode_settings["meter_power"] = meter_power
+
+        return await self._write_battery_mode_payload(station_id, 7, mode_settings)
