@@ -13,6 +13,7 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from .auth import AUTH_ERROR_NO_ACCESSIBLE_STATIONS, auth_error_to_config_error
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 from .hoymiles_api import HoymilesAPI
 
@@ -55,21 +56,29 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 authenticated = await api.authenticate()
                 if not authenticated:
                     _LOGGER.error(
-                        "Hoymiles authentication rejected: %s - %s",
+                        "Hoymiles authentication rejected via %s: %s - %s",
+                        api.last_auth_attempt,
                         api.last_auth_status,
                         api.last_auth_message,
                     )
-                    errors["base"] = "invalid_auth"
+                    errors["base"] = auth_error_to_config_error(api.last_auth_error_key)
                     return self.async_show_form(
                         step_id="user",
                         data_schema=STEP_USER_DATA_SCHEMA,
                         errors=errors,
                     )
 
+                user = await api.get_current_user()
+                if not user:
+                    _LOGGER.warning(
+                        "Hoymiles auth succeeded for %s but user profile lookup returned empty data",
+                        username,
+                    )
+
                 # Test getting stations
                 stations = await api.get_stations()
                 if not stations:
-                    errors["base"] = "no_stations"
+                    errors["base"] = AUTH_ERROR_NO_ACCESSIBLE_STATIONS
                     return self.async_show_form(
                         step_id="user",
                         data_schema=STEP_USER_DATA_SCHEMA,
@@ -121,7 +130,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         default=self.config_entry.options.get(
                             CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
                         ),
-                    ): int,
+                    ): vol.All(vol.Coerce(int), vol.Range(min=30, max=3600)),
                 }
             ),
         ) 

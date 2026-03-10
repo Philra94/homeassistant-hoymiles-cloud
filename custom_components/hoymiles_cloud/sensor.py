@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
-from datetime import datetime, timezone
+from datetime import datetime
+from typing import Any, Callable
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -14,119 +14,131 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    UnitOfEnergy,
-    UnitOfPower,
-    UnitOfMass,
+    PERCENTAGE,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
-    PERCENTAGE,
+    UnitOfEnergy,
+    UnitOfMass,
+    UnitOfPower,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
-from homeassistant.helpers.update_coordinator import (
-    CoordinatorEntity,
-    DataUpdateCoordinator,
-)
+from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .const import (
-    DOMAIN,
-    BATTERY_MODE_SELF_CONSUMPTION,
-    BATTERY_MODE_TIME_OF_USE,
-    BATTERY_MODE_BACKUP,
-    BATTERY_MODES,
+from .const import BATTERY_MODES, DOMAIN
+from .data import (
+    battery_settings_readable,
+    discover_pv_channels,
+    get_pv_indicator_value,
 )
-from .hoymiles_api import HoymilesAPI
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def safe_int_convert(value: Any) -> int:
-    """Safely convert a value to int, handling various edge cases.
-    
-    Args:
-        value: Input value that can be int, float, str, bool, None, or '-'.
-        
-    Returns:
-        int: Converted integer value. Returns 0 for invalid/missing data.
-        
-    Handles:
-        - Float strings like '22706.0' by converting to float first
-        - Missing data represented as '-', None, or empty string
-        - Whitespace-only strings
-        - Boolean values (True -> 1, False -> 0)
-    """
-    if value is None or value == '-' or value == '':
-        return 0
-    
-    # Handle whitespace-only strings
-    if isinstance(value, str) and value.strip() == '':
-        return 0
-    
-    # Handle boolean values
-    if isinstance(value, bool):
-        return int(value)
-    
+def safe_int_convert(value: Any) -> int | None:
+    """Safely convert a value to int."""
+    if value is None or value in {"", "-"}:
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        return None
     try:
-        # Handle float strings like '22706.0' by converting to float first
         return int(float(value))
-    except (ValueError, TypeError) as e:
-        _LOGGER.debug("Unexpected value during int conversion: %s, error: %s", value, e)
-        return 0
+    except (TypeError, ValueError):
+        return None
 
 
-def safe_float_convert(value: Any) -> float:
-    """Safely convert a value to float, handling various edge cases.
-    
-    Args:
-        value: Input value that can be int, float, str, bool, None, or '-'.
-        
-    Returns:
-        float: Converted float value. Returns 0.0 for invalid/missing data.
-        
-    Handles:
-        - Missing data represented as '-', None, or empty string
-        - Whitespace-only strings
-        - Boolean values (True -> 1.0, False -> 0.0)
-        - Integer and string representations of numbers
-    """
-    if value is None or value == '-' or value == '':
-        return 0.0
-    
-    # Handle whitespace-only strings
-    if isinstance(value, str) and value.strip() == '':
-        return 0.0
-    
-    # Handle boolean values
-    if isinstance(value, bool):
-        return float(value)
-    
+def safe_float_convert(value: Any) -> float | None:
+    """Safely convert a value to float."""
+    if value is None or value in {"", "-"}:
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        return None
     try:
         return float(value)
-    except (ValueError, TypeError) as e:
-        _LOGGER.debug("Unexpected value during float conversion: %s, error: %s", value, e)
-        return 0.0
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_timestamp(timestamp_str: str | None) -> datetime | None:
+    """Parse a naive local timestamp returned by the API."""
+    if not timestamp_str:
+        return None
+    try:
+        naive_dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+        local_aware_dt = naive_dt.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+        return dt_util.as_utc(local_aware_dt)
+    except (ValueError, TypeError) as err:
+        _LOGGER.warning("Failed to parse timestamp %s: %s", timestamp_str, err)
+        return None
+
+
+def is_battery_charging(station_data: dict[str, Any]) -> bool | None:
+    """Determine whether the battery is charging based on live flows."""
+    try:
+        reflux_data = station_data.get("real_time_data", {}).get("reflux_station_data", {})
+        bms_power = safe_float_convert(reflux_data.get("bms_power"))
+        if bms_power is not None:
+            return bms_power > 0
+
+        for flow in reflux_data.get("flows", []):
+            if flow.get("in") == 4 and safe_float_convert(flow.get("v")):
+                return True
+            if flow.get("out") == 4 and safe_float_convert(flow.get("v")):
+                return False
+    except Exception as err:  # pragma: no cover - defensive logging
+        _LOGGER.debug("Error determining battery charging status: %s", err)
+    return None
+
+
+def has_pv_indicator(station_data: dict[str, Any], key: str) -> bool:
+    """Return whether a PV indicator key is present."""
+    return get_pv_indicator_value(station_data.get("pv_indicators", {}), key) is not None
+
+
+def has_battery_telemetry(station_data: dict[str, Any]) -> bool:
+    """Return whether battery telemetry is available for the station."""
+    return bool(station_data.get("capabilities", {}).get("battery_telemetry"))
 
 
 @dataclass
 class HoymilesSensorDescription(SensorEntityDescription):
     """Class describing Hoymiles sensor entities."""
 
-    value_fn: Optional[Callable[[Dict], StateType]] = None
-    available_fn: Optional[Callable[[Dict], bool]] = None
+    value_fn: Callable[[dict[str, Any]], StateType] | None = None
+    available_fn: Callable[[dict[str, Any]], bool] | None = None
 
 
 SENSORS = [
-    # Power measurements (real-time)
     HoymilesSensorDescription(
         key="pv_power",
         name="PV Power",
         native_unit_of_measurement=UnitOfPower.WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: safe_float_convert(data.get("real_time_data", {}).get("real_power", 0)),
+        value_fn=lambda data: safe_float_convert(data.get("real_time_data", {}).get("real_power")),
+    ),
+    HoymilesSensorDescription(
+        key="grid_power",
+        name="Grid Power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: safe_float_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("grid_power")
+        ),
+    ),
+    HoymilesSensorDescription(
+        key="load_power",
+        name="Load Power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: safe_float_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("load_power")
+        ),
     ),
     HoymilesSensorDescription(
         key="battery_power",
@@ -135,37 +147,23 @@ SENSORS = [
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda data: safe_float_convert(
-            data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_power", 0)
-        ) if is_battery_charging(data) is not None else 0,
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_power")
+        ),
+        available_fn=has_battery_telemetry,
     ),
     HoymilesSensorDescription(
         key="battery_flow_direction",
         name="Battery Flow Direction",
         icon="mdi:battery-charging",
         value_fn=lambda data: (
-            "discharging" if is_battery_charging(data) is False else
-            "charging" if is_battery_charging(data) is True else
-            "unknown"
+            "discharging"
+            if is_battery_charging(data) is False
+            else "charging"
+            if is_battery_charging(data) is True
+            else "unknown"
         ),
+        available_fn=has_battery_telemetry,
     ),
-    HoymilesSensorDescription(
-        key="grid_power",
-        name="Grid Power",
-        native_unit_of_measurement=UnitOfPower.WATT,
-        device_class=SensorDeviceClass.POWER,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: safe_float_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("grid_power", 0)),
-    ),
-    HoymilesSensorDescription(
-        key="load_power",
-        name="Load Power",
-        native_unit_of_measurement=UnitOfPower.WATT,
-        device_class=SensorDeviceClass.POWER,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: safe_float_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("load_power", 0)),
-    ),
-    
-    # Battery state
     HoymilesSensorDescription(
         key="battery_soc",
         name="Battery State of Charge",
@@ -173,36 +171,30 @@ SENSORS = [
         device_class=SensorDeviceClass.BATTERY,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda data: safe_int_convert(
-            # First try to get real-time data if available
-            data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_soc") or 
-            # If not, use the current mode's reserve_soc from battery settings
-            data.get("battery_settings", {}).get("data", {}).get("reserve_soc", 50)
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_soc")
         ),
+        available_fn=has_battery_telemetry,
     ),
-    
-    # Environmental factors
     HoymilesSensorDescription(
         key="co2_emission_reduction",
         name="CO2 Emission Reduction",
         native_unit_of_measurement=UnitOfMass.GRAMS,
         device_class=SensorDeviceClass.WEIGHT,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("co2_emission_reduction", 0)),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("co2_emission_reduction")),
     ),
     HoymilesSensorDescription(
         key="plant_tree",
         name="Equivalent Trees Planted",
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("plant_tree", 0)),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("plant_tree")),
     ),
-
-    # Energy production - cumulative values
     HoymilesSensorDescription(
         key="today_energy",
         name="Today's Energy",
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("today_eq", 0)),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("today_eq")),
     ),
     HoymilesSensorDescription(
         key="month_energy",
@@ -210,7 +202,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("month_eq", 0)),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("month_eq")),
     ),
     HoymilesSensorDescription(
         key="year_energy",
@@ -218,7 +210,7 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("year_eq", 0)),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("year_eq")),
     ),
     HoymilesSensorDescription(
         key="total_energy",
@@ -226,17 +218,17 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("total_eq", 0)),
+        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("total_eq")),
     ),
-    
-    # Daily energy flows
     HoymilesSensorDescription(
         key="pv_to_load_energy_today",
         name="PV to Load Energy Today",
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("pv_to_load_eq", 0)),
+        value_fn=lambda data: safe_int_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("pv_to_load_eq")
+        ),
     ),
     HoymilesSensorDescription(
         key="grid_import_energy_today",
@@ -244,7 +236,9 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("meter_b_in_eq", 0)),
+        value_fn=lambda data: safe_int_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("meter_b_in_eq")
+        ),
     ),
     HoymilesSensorDescription(
         key="grid_export_energy_today",
@@ -252,7 +246,9 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("meter_b_out_eq", 0)),
+        value_fn=lambda data: safe_int_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("meter_b_out_eq")
+        ),
     ),
     HoymilesSensorDescription(
         key="battery_charge_energy_today",
@@ -260,7 +256,10 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_in_eq", 0)),
+        value_fn=lambda data: safe_int_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_in_eq")
+        ),
+        available_fn=has_battery_telemetry,
     ),
     HoymilesSensorDescription(
         key="battery_discharge_energy_today",
@@ -268,7 +267,10 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_out_eq", 0)),
+        value_fn=lambda data: safe_int_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("bms_out_eq")
+        ),
+        available_fn=has_battery_telemetry,
     ),
     HoymilesSensorDescription(
         key="total_consumption_today",
@@ -276,17 +278,19 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("use_eq_total", 0)),
+        value_fn=lambda data: safe_int_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("use_eq_total")
+        ),
     ),
-    
-    # Cumulative grid metrics
     HoymilesSensorDescription(
         key="grid_import_total",
         name="Grid Import Total",
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("mb_in_eq", {}).get("total_eq", 0)),
+        value_fn=lambda data: safe_int_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("mb_in_eq", {}).get("total_eq")
+        ),
     ),
     HoymilesSensorDescription(
         key="grid_export_total",
@@ -294,18 +298,36 @@ SENSORS = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(data.get("real_time_data", {}).get("reflux_station_data", {}).get("mb_out_eq", {}).get("total_eq", 0)),
+        value_fn=lambda data: safe_int_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("mb_out_eq", {}).get("total_eq")
+        ),
     ),
-    
-    # System status information
+    HoymilesSensorDescription(
+        key="reported_inverter_count",
+        name="Reported Inverter Count",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda data: safe_int_convert(
+            data.get("real_time_data", {}).get("reflux_station_data", {}).get("inv_num")
+        ),
+    ),
     HoymilesSensorDescription(
         key="last_update_time",
         name="Last Data Update Time",
         device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda data: parse_timestamp(data.get("real_time_data", {}).get("data_time")),
     ),
-
-    # PV String data from indicators API
+    HoymilesSensorDescription(
+        key="battery_settings_access",
+        name="Battery Settings Access",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda data: (
+            "readable"
+            if battery_settings_readable(data.get("battery_settings"))
+            else data.get("battery_settings", {}).get("error_message")
+            or "unavailable"
+        ),
+    ),
     HoymilesSensorDescription(
         key="pv_string_power",
         name="PV String Power",
@@ -313,116 +335,12 @@ SENSORS = [
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda data: safe_float_convert(
-            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
-                if item.get("key") == "pv_p_total"), 0)
+            get_pv_indicator_value(data.get("pv_indicators", {}), "pv_p_total")
         ),
+        available_fn=lambda data: has_pv_indicator(data, "pv_p_total"),
     ),
-    HoymilesSensorDescription(
-        key="pv1_voltage",
-        name="PV1 Voltage",
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: safe_float_convert(
-            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
-                if item.get("key") == "1_pv_v"), 0)
-        ),
-    ),
-    HoymilesSensorDescription(
-        key="pv1_current",
-        name="PV1 Current",
-        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
-        device_class=SensorDeviceClass.CURRENT,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: safe_float_convert(
-            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
-                if item.get("key") == "1_pv_i"), 0)
-        ),
-    ),
-    HoymilesSensorDescription(
-        key="pv1_power",
-        name="PV1 Power",
-        native_unit_of_measurement=UnitOfPower.WATT,
-        device_class=SensorDeviceClass.POWER,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: safe_float_convert(
-            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
-                if item.get("key") == "1_pv_p"), 0)
-        ),
-    ),
-    HoymilesSensorDescription(
-        key="pv2_voltage",
-        name="PV2 Voltage",
-        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
-        device_class=SensorDeviceClass.VOLTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: safe_float_convert(
-            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
-                if item.get("key") == "2_pv_v"), 0)
-        ),
-    ),
-    HoymilesSensorDescription(
-        key="pv2_current",
-        name="PV2 Current",
-        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
-        device_class=SensorDeviceClass.CURRENT,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: safe_float_convert(
-            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
-                if item.get("key") == "2_pv_i"), 0)
-        ),
-    ),
-    HoymilesSensorDescription(
-        key="pv2_power",
-        name="PV2 Power",
-        native_unit_of_measurement=UnitOfPower.WATT,
-        device_class=SensorDeviceClass.POWER,
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: safe_float_convert(
-            next((item.get("val", 0) for item in data.get("pv_indicators", {}).get("list", []) 
-                if item.get("key") == "2_pv_p"), 0)
-        ),
-    ),
-
-    # Add a temperature sensor if needed
-    # Example:
-    # HoymilesSensorDescription(
-    #    key="temperature",
-    #    name="Temperature",
-    #    native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-    #    device_class=SensorDeviceClass.TEMPERATURE,
-    #    state_class=SensorStateClass.MEASUREMENT,
-    #    value_fn=lambda data: float(data.get("real_time_data", {}).get("temperature", 0) or 0),
-    # ),
 ]
 
-# Mode names for the mode number to text mapping
-MODE_NAMES = {
-    1: "Self-Consumption Mode",
-    2: "Economy Mode",
-    3: "Backup Mode",
-    4: "Off-Grid Mode",
-    7: "Peak Shaving Mode",
-    8: "Time of Use Mode",
-}
-
-# Add extended mode mapping for diagnostic sensors
-BATTERY_MODE_TIME_OF_USE = 8
-BATTERY_MODE_UNKNOWN_4 = 4
-BATTERY_MODE_FEED_IN_PRIORITY = 5
-BATTERY_MODE_OFF_GRID = 4
-BATTERY_MODE_ECONOMIC = 2
-BATTERY_MODE_CUSTOM = 7
-
-# Extended mode dictionary with all modes from the API response
-EXTENDED_MODE_NAMES = {
-    1: "Self-Consumption Mode",
-    2: "Economy Mode",
-    3: "Backup Mode",
-    4: "Off-Grid Mode",
-    7: "Peak Shaving Mode",
-    8: "Time of Use Mode"
-}
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -430,15 +348,14 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Hoymiles Cloud sensor entries."""
-    data = hass.data[DOMAIN][entry.entry_id]
-    coordinator = data["coordinator"]
-    stations = data["stations"]
-    
-    entities = []
-    
-    # For each station, create all standard sensors first
+    runtime_data = hass.data[DOMAIN][entry.entry_id]
+    coordinator = runtime_data["coordinator"]
+    stations = runtime_data["stations"]
+
+    entities: list[SensorEntity] = []
     for station_id, station_name in stations.items():
-        # Add standard sensors from SENSORS
+        station_data = coordinator.data.get(station_id, {}) if coordinator.data else {}
+
         for description in SENSORS:
             entities.append(
                 HoymilesSensor(
@@ -448,21 +365,72 @@ async def async_setup_entry(
                     station_name=station_name,
                 )
             )
-        
-        # Add only one battery mode sensor
-        entities.append(
-            HoymilesBatteryModeSensor(
-                coordinator=coordinator,
-                station_id=station_id,
-                station_name=station_name,
+
+        if battery_settings_readable(station_data.get("battery_settings", {})):
+            entities.append(
+                HoymilesBatteryModeSensor(
+                    coordinator=coordinator,
+                    station_id=station_id,
+                    station_name=station_name,
+                )
             )
-        )
-    
+
+        for channel in discover_pv_channels(station_data.get("pv_indicators", {})):
+            entities.extend(
+                [
+                    HoymilesPVChannelSensor(
+                        coordinator=coordinator,
+                        station_id=station_id,
+                        station_name=station_name,
+                        channel=channel,
+                        metric="v",
+                    ),
+                    HoymilesPVChannelSensor(
+                        coordinator=coordinator,
+                        station_id=station_id,
+                        station_name=station_name,
+                        channel=channel,
+                        metric="i",
+                    ),
+                    HoymilesPVChannelSensor(
+                        coordinator=coordinator,
+                        station_id=station_id,
+                        station_name=station_name,
+                        channel=channel,
+                        metric="p",
+                    ),
+                ]
+            )
+
     async_add_entities(entities)
 
 
-class HoymilesSensor(CoordinatorEntity, SensorEntity):
-    """Representation of a Hoymiles sensor."""
+class HoymilesBaseSensor(CoordinatorEntity, SensorEntity):
+    """Base sensor class for station-scoped Hoymiles entities."""
+
+    def __init__(
+        self,
+        coordinator: DataUpdateCoordinator,
+        station_id: str,
+        station_name: str,
+    ) -> None:
+        """Initialize the shared station fields."""
+        super().__init__(coordinator)
+        self._station_id = station_id
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, station_id)},
+            "name": station_name,
+            "manufacturer": "Hoymiles",
+            "model": "Solar Inverter System",
+        }
+
+    def _get_station_data(self) -> dict[str, Any]:
+        """Return the station payload from the coordinator."""
+        return self.coordinator.data.get(self._station_id, {}) if self.coordinator.data else {}
+
+
+class HoymilesSensor(HoymilesBaseSensor):
+    """Representation of a generic Hoymiles sensor."""
 
     entity_description: HoymilesSensorDescription
 
@@ -474,36 +442,20 @@ class HoymilesSensor(CoordinatorEntity, SensorEntity):
         station_name: str,
     ) -> None:
         """Initialize the sensor."""
-        super().__init__(coordinator)
+        super().__init__(coordinator, station_id, station_name)
         self.entity_description = description
-        self._station_id = station_id
-        self._station_name = station_name
-        
-        # Set unique ID and name
         self._attr_unique_id = f"{DOMAIN}_{station_id}_{description.key}"
         self._attr_name = f"{station_name} {description.name}"
-        
-        # Set device info
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, station_id)},
-            "name": station_name,
-            "manufacturer": "Hoymiles",
-            "model": "Solar Inverter System",
-        }
 
     @property
     def native_value(self) -> StateType:
         """Return the state of the sensor."""
-        if self.coordinator.data is None:
+        if not self.entity_description.value_fn:
             return None
-            
         try:
-            station_data = self.coordinator.data.get(self._station_id, {})
-            if self.entity_description.value_fn:
-                return self.entity_description.value_fn(station_data)
-            return None
-        except (KeyError, ValueError, TypeError) as e:
-            _LOGGER.error("Error getting sensor value: %s", e)
+            return self.entity_description.value_fn(self._get_station_data())
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.error("Error getting sensor value for %s: %s", self.entity_description.key, err)
             return None
 
     @property
@@ -511,29 +463,12 @@ class HoymilesSensor(CoordinatorEntity, SensorEntity):
         """Return if entity is available."""
         if not self.coordinator.last_update_success:
             return False
-            
-        station_data = self.coordinator.data.get(self._station_id, {})
-        
-        # Check if we have the minimum data required
-        key_prefix = self.entity_description.key.split("_")[0]
-        
-        if key_prefix in ["pv1", "pv2"] or self.entity_description.key == "pv_string_power":
-            # This is a PV indicator sensor - check for PV indicators data
-            if "pv_indicators" not in station_data:
-                return False
-        else:
-            # This is a standard sensor - check for real-time data
-            if "real_time_data" not in station_data:
-                return False
-            
-        # Check if specific availability function is defined
         if self.entity_description.available_fn:
-            return self.entity_description.available_fn(station_data)
-            
-        return True
+            return self.entity_description.available_fn(self._get_station_data())
+        return bool(self._get_station_data())
 
 
-class HoymilesBatteryModeSensor(CoordinatorEntity, SensorEntity):
+class HoymilesBatteryModeSensor(HoymilesBaseSensor):
     """Sensor for displaying the current battery mode."""
 
     def __init__(
@@ -542,201 +477,72 @@ class HoymilesBatteryModeSensor(CoordinatorEntity, SensorEntity):
         station_id: str,
         station_name: str,
     ) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
-        self._station_id = station_id
-        self._station_name = station_name
-        
-        # Set entity properties
+        """Initialize the battery mode sensor."""
+        super().__init__(coordinator, station_id, station_name)
         self._attr_unique_id = f"{DOMAIN}_{station_id}_battery_mode"
         self._attr_name = f"{station_name} Battery Mode Status"
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
-        
-        # Set device info
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, station_id)},
-            "name": station_name,
-            "manufacturer": "Hoymiles",
-            "model": "Solar Inverter System",
-        }
 
     @property
-    def native_value(self) -> Optional[str]:
-        """Return the current battery mode as text."""
-        if self.coordinator.data is None:
-            return None
-            
-        station_data = self.coordinator.data.get(self._station_id, {})
-        if not station_data:
-            return None
-            
-        battery_settings = station_data.get("battery_settings", {})
-        if not battery_settings:
-            return None
-            
+    def native_value(self) -> str | None:
+        """Return the current battery mode."""
+        battery_settings = self._get_station_data().get("battery_settings", {})
         mode = battery_settings.get("data", {}).get("mode")
         if mode is None:
             return None
-            
-        # Convert mode number to text
-        return MODE_NAMES.get(mode, f"Unknown ({mode})")
+        return BATTERY_MODES.get(mode, f"Unknown ({mode})")
 
     @property
     def available(self) -> bool:
-        """Return True if entity is available."""
-        if not self.coordinator.last_update_success:
-            return False
-            
-        if self.coordinator.data is None:
-            return False
-            
-        station_data = self.coordinator.data.get(self._station_id, {})
-        if not station_data:
-            return False
-            
-        return True
+        """Return whether the battery mode sensor is available."""
+        return self.coordinator.last_update_success and battery_settings_readable(
+            self._get_station_data().get("battery_settings", {})
+        )
 
 
-class HoymilesBatteryModeSettingSensor(CoordinatorEntity, SensorEntity):
-    """Sensor for displaying settings of a specific battery mode (k_1, k_2, etc.)."""
+class HoymilesPVChannelSensor(HoymilesBaseSensor):
+    """Dynamic PV channel sensor discovered from indicator keys."""
+
+    _METRIC_CONFIG = {
+        "v": ("Voltage", UnitOfElectricPotential.VOLT, SensorDeviceClass.VOLTAGE),
+        "i": ("Current", UnitOfElectricCurrent.AMPERE, SensorDeviceClass.CURRENT),
+        "p": ("Power", UnitOfPower.WATT, SensorDeviceClass.POWER),
+    }
 
     def __init__(
         self,
         coordinator: DataUpdateCoordinator,
         station_id: str,
         station_name: str,
-        mode_key: str,
-        mode_name_key: str,
-        mode_name: str,
-        setting_name: str,
-        unit: str,
+        channel: int,
+        metric: str,
     ) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
-        self._station_id = station_id
-        self._station_name = station_name
-        self._mode_key = mode_key
-        self._mode_name_key = mode_name_key
-        self._mode_name = mode_name
-        self._setting_name = setting_name
+        """Initialize the PV channel sensor."""
+        super().__init__(coordinator, station_id, station_name)
+        label, unit, device_class = self._METRIC_CONFIG[metric]
+        self._channel = channel
+        self._metric = metric
+        self._indicator_key = f"{channel}_pv_{metric}"
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_pv{channel}_{metric}"
+        self._attr_name = f"{station_name} PV{channel} {label}"
         self._attr_native_unit_of_measurement = unit
-        
-        # Set entity properties
-        self._attr_unique_id = f"{DOMAIN}_{station_id}_{mode_name_key}_{setting_name}_diagnostic"
-        self._attr_name = f"{station_name} {self._mode_name} {setting_name.replace('_', ' ').title()}"
-        self._attr_entity_category = EntityCategory.DIAGNOSTIC
-        
-        # Set device info
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, station_id)},
-            "name": station_name,
-            "manufacturer": "Hoymiles",
-            "model": "Solar Inverter System",
-        }
+        self._attr_device_class = device_class
+        self._attr_state_class = SensorStateClass.MEASUREMENT
 
     @property
-    def native_value(self) -> Optional[int]:
-        """Return the mode setting value."""
-        if self.coordinator.data is None:
-            return None
-            
-        station_data = self.coordinator.data.get(self._station_id, {})
-        if not station_data:
-            return None
-            
-        battery_settings = station_data.get("battery_settings", {})
-        if not battery_settings:
-            return None
-            
-        # First try to get the value directly from mode_data
-        if "mode_data" in battery_settings:
-            mode_data = battery_settings.get("mode_data", {})
-            if self._mode_key in mode_data and self._setting_name in mode_data[self._mode_key]:
-                return mode_data[self._mode_key][self._setting_name]
-        
-        # As fallback, check in mode_settings
-        if "mode_settings" in battery_settings:
-            mode_number = int(self._mode_key.split("_")[1]) if "_" in self._mode_key else 0
-            mode_settings = battery_settings.get("mode_settings", {})
-            if mode_number in mode_settings and self._setting_name in mode_settings[mode_number]:
-                return mode_settings[mode_number][self._setting_name]
-                
-        return None
+    def native_value(self) -> float | None:
+        """Return the current indicator value."""
+        return safe_float_convert(
+            get_pv_indicator_value(
+                self._get_station_data().get("pv_indicators", {}),
+                self._indicator_key,
+            )
+        )
 
     @property
     def available(self) -> bool:
-        """Return True if entity is available."""
-        if not self.coordinator.last_update_success:
-            return False
-            
-        if self.coordinator.data is None:
-            return False
-            
-        station_data = self.coordinator.data.get(self._station_id, {})
-        if not station_data:
-            return False
-            
-        battery_settings = station_data.get("battery_settings", {})
-        
-        # Check if we have mode_data in the response
-        if "mode_data" in battery_settings:
-            mode_data = battery_settings.get("mode_data", {})
-            if self._mode_key in mode_data and self._setting_name in mode_data[self._mode_key]:
-                return True
-                
-        # Check in mode_settings
-        if "mode_settings" in battery_settings:
-            mode_number = int(self._mode_key.split("_")[1]) if "_" in self._mode_key else 0
-            mode_settings = battery_settings.get("mode_settings", {})
-            if mode_number in mode_settings and self._setting_name in mode_settings[mode_number]:
-                return True
-                
-        return False
-
-def parse_timestamp(timestamp_str: str | None) -> datetime | None:
-    """Parse timestamp string from the API.
-
-    The API returns naive timestamps (without timezone info) that represent
-    the local time. We need to interpret them in the Home Assistant timezone
-    and convert to UTC for proper display.
-    """
-    if not timestamp_str:
-        return None
-    try:
-        # Parse the naive datetime string
-        naive_dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-
-        # Assume the timestamp is in Home Assistant's configured timezone
-        # and convert it to UTC-aware datetime
-        local_aware_dt = naive_dt.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
-        return dt_util.as_utc(local_aware_dt)
-    except (ValueError, TypeError) as e:
-        _LOGGER.warning("Failed to parse timestamp: %s, error: %s", timestamp_str, e)
-        return None
-
-def is_battery_charging(data):
-    """Determine if the battery is charging based on energy flow metrics."""
-    try:
-        reflux_data = data.get("real_time_data", {}).get("reflux_station_data", {})
-        # Get battery power directly if available (positive = charging, negative = discharging)
-        bms_power = reflux_data.get("bms_power")
-        if bms_power is not None:
-            return safe_float_convert(bms_power) > 0
-        # Do not infer direction from cumulative daily energy totals, as it is inaccurate
-        # over the day. Prefer instantaneous flows below; otherwise return unknown.
-        
-        # Look at the flows data if available
-        flows = reflux_data.get("flows", [])
-        for flow in flows:
-            # Check for flows to battery (in=4) from other components
-            if flow.get("in") == 4 and flow.get("v", 0) > 0:
-                return True
-            # Check for flows from battery (out=4) to other components  
-            if flow.get("out") == 4 and flow.get("v", 0) > 0:
-                return False
-            
-        # If no data is available, return None to indicate unknown state
-        return None
-    except Exception as e:
-        _LOGGER.debug("Error determining battery charging status: %s", e)
-        return None 
+        """Return whether this PV channel is present in the payload."""
+        return self.coordinator.last_update_success and has_pv_indicator(
+            self._get_station_data(),
+            self._indicator_key,
+        )
