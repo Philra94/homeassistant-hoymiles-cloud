@@ -168,9 +168,11 @@ def test_authenticate_preserves_s_miles_home_failure_details() -> None:
     session = FakeSession(
         [
             {"status": "0", "message": "success", "data": {"a": None, "n": "nonce1"}},
-            {"status": "1", "message": "Can only login to the S-Miles Home."},
+            {"status": "1", "message": "Invalid credentials"},
             {"status": "0", "message": "success", "data": {"a": None, "n": "nonce2"}},
             {"status": "1", "message": "Invalid credentials"},
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce3"}},
+            {"status": "1", "message": "Can only login to the S-Miles Home."},
             {"status": "1", "message": "Invalid credentials"},
         ]
     )
@@ -189,8 +191,10 @@ def test_authenticate_classifies_version_gated_failures() -> None:
     session = FakeSession(
         [
             {"status": "0", "message": "success", "data": {"a": None, "n": "nonce1"}},
-            {"status": "1", "message": "Your app version is low. Please update to the latest version."},
+            {"status": "1", "message": "Invalid credentials"},
             {"status": "0", "message": "success", "data": {"a": None, "n": "nonce2"}},
+            {"status": "1", "message": "Your app version is low. Please update to the latest version."},
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce3"}},
             {"status": "1", "message": "Invalid credentials"},
             {"status": "1", "message": "Invalid credentials"},
         ]
@@ -204,13 +208,110 @@ def test_authenticate_classifies_version_gated_failures() -> None:
     assert auth_error_to_config_error(api.last_auth_error_key) == "app_update_required"
 
 
-def test_mobile_profile_headers_include_version_metadata() -> None:
-    """Mobile-profile requests should include explicit version headers."""
+def test_installer_profile_headers_include_version_metadata() -> None:
+    """Installer-profile requests should include explicit version headers."""
     api = HoymilesAPI(FakeSession([]), "user@example.com", "secret")
 
-    headers = api._json_headers(client_profile="mobile", app_version="3.7.0")
+    headers = api._json_headers(client_profile="installer", app_version="3.7.1")
 
-    assert headers["User-Agent"] == "S-Miles Home/3.7.0"
-    assert headers["App-Version"] == "3.7.0"
-    assert headers["X-App-Version"] == "3.7.0"
+    assert headers["User-Agent"] == "S-Miles Installer/3.7.1"
+    assert headers["App-Version"] == "3.7.1"
+    assert headers["X-App-Version"] == "3.7.1"
     assert headers["X-Client-Type"] == "mobile"
+
+
+def test_home_profile_headers_include_version_metadata() -> None:
+    """Home-profile requests should include explicit version headers."""
+    api = HoymilesAPI(FakeSession([]), "user@example.com", "secret")
+
+    headers = api._json_headers(client_profile="home", app_version="2.8.0")
+
+    assert headers["User-Agent"] == "S-Miles Home/2.8.0"
+    assert headers["App-Version"] == "2.8.0"
+    assert headers["X-App-Version"] == "2.8.0"
+    assert headers["X-Client-Type"] == "mobile"
+
+
+def test_configured_auth_preferences_affect_future_attempts() -> None:
+    """Configured auth preferences should affect subsequent authenticate calls."""
+    session = FakeSession(
+        [
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce1"}},
+            {"status": "0", "message": "success", "data": {"token": "token-123"}},
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api.configure_auth(auth_mode="home_v3", app_version="2.8.0")
+
+    authenticated = asyncio.run(api.authenticate())
+
+    assert authenticated is True
+    assert api.auth_method == "home_v3:sha256_v3"
+    assert api.last_auth_attempt == "home_v3"
+    assert session.requests[0]["kwargs"]["headers"]["User-Agent"] == "S-Miles Home/2.8.0"
+
+
+def test_unsalted_v3_retries_with_sha256_hex_variant() -> None:
+    """Unsalted v3 auth should retry a browser-like SHA-256 hex variant."""
+    session = FakeSession(
+        [
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce1"}},
+            {"status": "1", "message": "Log in failed. Please check your account and password.#7"},
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce2"}},
+            {"status": "0", "message": "success", "data": {"token": "token-hex"}},
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api.configure_auth(auth_mode="web_v3")
+
+    authenticated = asyncio.run(api.authenticate())
+
+    assert authenticated is True
+    assert api.auth_method == "web_v3:sha256_hex_v3"
+    first_login_payload = session.requests[1]["kwargs"]["json"]
+    second_login_payload = session.requests[3]["kwargs"]["json"]
+    assert "." in first_login_payload["ch"]
+    assert len(second_login_payload["ch"]) == 64
+    assert "." not in second_login_payload["ch"]
+
+
+def test_pre_insp_accepts_top_level_payload_shape() -> None:
+    """Top-level pre-inspection payloads should be treated as a successful response."""
+    session = FakeSession(
+        [
+            {"u": "user@example.com", "n": "nonce-top"},
+            {"status": "0", "message": "success", "data": {"token": "token-top"}},
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api.configure_auth(auth_mode="web_v3")
+
+    authenticated = asyncio.run(api.authenticate())
+
+    assert authenticated is True
+    assert api.auth_method == "web_v3:sha256_v3"
+
+
+def test_auth_attempt_summary_lists_all_attempts() -> None:
+    """Failed auth runs should keep a readable attempt summary."""
+    session = FakeSession(
+        [
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce1"}},
+            {"status": "1", "message": "Invalid credentials"},
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce2"}},
+            {"status": "1", "message": "Your app version is low. Please update to the latest version."},
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce3"}},
+            {"status": "1", "message": "Can only login to the S-Miles Home."},
+            {"status": "1", "message": "Invalid credentials"},
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+
+    authenticated = asyncio.run(api.authenticate())
+
+    assert authenticated is False
+    assert "web_v3[web]" in api.last_auth_attempt_summary
+    assert "installer_v3[installer/3.7.1]" in api.last_auth_attempt_summary
+    assert "home_v3[home/2.8.0]" in api.last_auth_attempt_summary
+    assert "legacy_v0[web]" in api.last_auth_attempt_summary
+    assert "sha256_v3" in api.last_auth_attempt_summary

@@ -21,11 +21,20 @@ class AuthAttempt:
     status: str | None = None
     message: str | None = None
     token: str | None = None
+    app_version: str | None = None
+    variant: str | None = None
 
     @property
     def error_key(self) -> str:
         """Return a normalized error key for this attempt."""
         return classify_auth_failure(self.status, self.message)
+
+    def summary(self) -> str:
+        """Return a compact human-readable summary for diagnostics."""
+        version = f"/{self.app_version}" if self.app_version else ""
+        outcome = "ok" if self.success else f"{self.status or '?'}:{self.message or '<no message>'}"
+        variant = f" ({self.variant})" if self.variant else ""
+        return f"{self.method}[{self.client_profile}{version}]{variant} -> {outcome}"
 
 
 def classify_auth_failure(status: str | None, message: str | None) -> str:
@@ -52,6 +61,13 @@ def choose_preferred_failure(attempts: list[AuthAttempt]) -> AuthAttempt | None:
         AUTH_ERROR_UNKNOWN: 1,
     }
     return max(attempts, key=lambda attempt: priority.get(attempt.error_key, 0))
+
+
+def summarize_auth_attempts(attempts: list[AuthAttempt]) -> str:
+    """Return a compact one-line summary of all auth attempts."""
+    if not attempts:
+        return "<no attempts>"
+    return "; ".join(attempt.summary() for attempt in attempts)
 
 
 def auth_error_to_config_error(error_key: str | None) -> str:
