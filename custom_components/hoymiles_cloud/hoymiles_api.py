@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
-from .auth import AuthAttempt, choose_preferred_failure
+from .auth import AuthAttempt, choose_preferred_failure, summarize_auth_attempts
 from .const import (
     API_AUTH_URL,
     API_AUTH_PRE_INSP_URL,
@@ -29,14 +29,15 @@ from .const import (
     BATTERY_MODE_BACKUP,
     BATTERY_MODES,
     AUTH_MODE_AUTO,
+    AUTH_MODE_HOME_V3,
+    AUTH_MODE_INSTALLER_V3,
     AUTH_MODE_LEGACY_V0,
-    AUTH_MODE_MOBILE_V3,
     AUTH_MODE_WEB_V3,
-    CLIENT_PROFILE_MOBILE,
+    AUTH_MODE_TO_PROFILE,
+    AUTH_PROFILE_DEFAULTS,
+    CLIENT_PROFILE_HOME,
+    CLIENT_PROFILE_INSTALLER,
     CLIENT_PROFILE_WEB,
-    DEFAULT_MOBILE_APP_VERSION,
-    DEFAULT_MOBILE_USER_AGENT,
-    DEFAULT_WEB_USER_AGENT,
 )
 from .data import (
     MODE_KEY_MAPPING,
@@ -77,7 +78,10 @@ class HoymilesAPI:
         self._last_auth_error_key: Optional[str] = None
         self._last_auth_attempt: Optional[str] = None
         self._last_auth_attempts: list[AuthAttempt] = []
-        self._mobile_app_version = DEFAULT_MOBILE_APP_VERSION
+        self._auth_mode_preference = AUTH_MODE_AUTO
+        self._app_version_override: str | None = None
+        self._active_client_profile = CLIENT_PROFILE_WEB
+        self._active_app_version: str | None = None
 
     def is_token_expired(self) -> bool:
         """Check if the token is expired."""
@@ -108,6 +112,26 @@ class HoymilesAPI:
         """Return the last attempted authentication strategy."""
         return self._last_auth_attempt
 
+    @property
+    def last_auth_attempts(self) -> list[AuthAttempt]:
+        """Return all attempts from the most recent auth run."""
+        return list(self._last_auth_attempts)
+
+    @property
+    def last_auth_attempt_summary(self) -> str:
+        """Return a compact summary of the most recent auth run."""
+        return summarize_auth_attempts(self._last_auth_attempts)
+
+    def configure_auth(
+        self,
+        *,
+        auth_mode: str = AUTH_MODE_AUTO,
+        app_version: str | None = None,
+    ) -> None:
+        """Persist auth preferences for future login attempts."""
+        self._auth_mode_preference = auth_mode
+        self._app_version_override = app_version.strip() if app_version else None
+
     def _set_auth_failure(self, status: Optional[str], message: Optional[str]) -> None:
         """Store the most recent authentication failure."""
         self._last_auth_status = str(status) if status is not None else None
@@ -123,6 +147,25 @@ class HoymilesAPI:
         self._last_auth_message = None
         self._last_auth_error_key = None
 
+    def _resolve_app_version(
+        self,
+        client_profile: str,
+        app_version: str | None = None,
+    ) -> str | None:
+        """Return the effective app version for a client profile."""
+        if app_version:
+            return app_version
+        if self._app_version_override and client_profile != CLIENT_PROFILE_WEB:
+            return self._app_version_override
+        return AUTH_PROFILE_DEFAULTS[client_profile]["app_version"]
+
+    def _get_auth_mode_for_profile(self, client_profile: str) -> str:
+        """Return the auth mode constant for a client profile."""
+        for auth_mode, profile in AUTH_MODE_TO_PROFILE.items():
+            if profile == client_profile:
+                return auth_mode
+        raise ValueError(f"Unsupported auth profile: {client_profile}")
+
     def _json_headers(
         self,
         *,
@@ -134,19 +177,26 @@ class HoymilesAPI:
         headers = {"Content-Type": "application/json"}
         if include_accept:
             headers["Accept"] = "application/json"
-        if client_profile == CLIENT_PROFILE_MOBILE:
-            version = app_version or self._mobile_app_version
-            headers["User-Agent"] = f"{DEFAULT_MOBILE_USER_AGENT}/{version}"
+        profile_defaults = AUTH_PROFILE_DEFAULTS[client_profile]
+        version = self._resolve_app_version(client_profile, app_version=app_version)
+        user_agent = profile_defaults["user_agent"]
+        if version:
+            headers["User-Agent"] = f"{user_agent}/{version}"
             headers["App-Version"] = version
             headers["X-App-Version"] = version
-            headers["X-Client-Type"] = CLIENT_PROFILE_MOBILE
+            if profile_defaults["x_client_type"]:
+                headers["X-Client-Type"] = profile_defaults["x_client_type"]
         else:
-            headers["User-Agent"] = DEFAULT_WEB_USER_AGENT
+            headers["User-Agent"] = user_agent
         return headers
 
     def _auth_headers(self, *, include_accept: bool = True) -> Dict[str, str]:
         """Build authenticated request headers."""
-        headers = self._json_headers(include_accept=include_accept)
+        headers = self._json_headers(
+            include_accept=include_accept,
+            client_profile=self._active_client_profile,
+            app_version=self._active_app_version,
+        )
         if self._token:
             # The API expects the raw token, not a Bearer prefix.
             headers["Authorization"] = self._token
@@ -162,8 +212,184 @@ class HoymilesAPI:
 
     def _record_auth_success(self, attempt: AuthAttempt) -> bool:
         """Persist a successful auth attempt."""
-        self._set_auth_success(attempt.method, attempt.token)
+        method = attempt.method if not attempt.variant else f"{attempt.method}:{attempt.variant}"
+        self._set_auth_success(method, attempt.token)
+        self._last_auth_attempt = attempt.method
+        self._active_client_profile = attempt.client_profile
+        self._active_app_version = attempt.app_version
         return True
+
+    def _build_auth_attempts(self, auth_mode: str) -> list[tuple[str, str]]:
+        """Return the sequence of auth modes and client profiles to try."""
+        if auth_mode == AUTH_MODE_LEGACY_V0:
+            return [(AUTH_MODE_LEGACY_V0, CLIENT_PROFILE_WEB)]
+        if auth_mode in AUTH_MODE_TO_PROFILE:
+            return [(auth_mode, AUTH_MODE_TO_PROFILE[auth_mode])]
+        return [
+            (AUTH_MODE_WEB_V3, CLIENT_PROFILE_WEB),
+            (AUTH_MODE_INSTALLER_V3, CLIENT_PROFILE_INSTALLER),
+            (AUTH_MODE_HOME_V3, CLIENT_PROFILE_HOME),
+            (AUTH_MODE_LEGACY_V0, CLIENT_PROFILE_WEB),
+        ]
+
+    def _parse_pre_insp_response(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[str | None, str | None, dict[str, Any]]:
+        """Normalize pre-inspection responses across observed response shapes."""
+        if "status" in payload or "data" in payload:
+            status = str(payload.get("status")) if payload.get("status") is not None else None
+            message = payload.get("message")
+            data = payload.get("data")
+            return status, message, data if isinstance(data, dict) else {}
+
+        # Some browser captures appear to return the pre-inspection payload at the top level.
+        if any(key in payload for key in ("a", "n", "u")):
+            return "0", "success", payload
+
+        return None, payload.get("message"), {}
+
+    def _should_retry_unsalted_variant(self, status: str | None, message: str | None) -> bool:
+        """Return whether an unsalted login failure looks hash-variant specific."""
+        text = (message or "").lower()
+        retry_markers = (
+            "invalid credentials",
+            "log in failed",
+            "check your account and password",
+        )
+        return any(marker in text for marker in retry_markers) or status == "7"
+
+    def _build_unsalted_v3_candidates(self) -> list[tuple[str, str]]:
+        """Return the observed no-salt credential hash variants to try."""
+        md5_password = hashlib.md5(self._password.encode()).hexdigest()
+        sha256_password = hashlib.sha256(self._password.encode())
+        return [
+            (
+                "sha256_v3",
+                f"{md5_password}.{base64.b64encode(sha256_password.digest()).decode()}",
+            ),
+            (
+                "sha256_hex_v3",
+                sha256_password.hexdigest(),
+            ),
+        ]
+
+    async def _pre_inspect_v3(
+        self,
+        *,
+        client_profile: str,
+        method_name: str,
+        headers: dict[str, str],
+        app_version: str | None,
+    ) -> AuthAttempt | tuple[dict[str, Any], str | None]:
+        """Run v3 pre-inspection and return normalized data or a failed attempt."""
+        try:
+            async with self._session.post(
+                API_AUTH_PRE_INSP_URL,
+                headers=headers,
+                json={"u": self._username},
+            ) as response:
+                pre_resp = await response.json()
+        except Exception as e:
+            _LOGGER.debug("Argon2 pre-inspection request failed: %s", e)
+            return self._record_auth_failure(
+                AuthAttempt(
+                    method=method_name,
+                    client_profile=client_profile,
+                    success=False,
+                    message=str(e),
+                    app_version=app_version,
+                )
+            )
+
+        status, message, pre_data = self._parse_pre_insp_response(pre_resp)
+        if status not in (None, "0"):
+            return self._record_auth_failure(
+                AuthAttempt(
+                    method=method_name,
+                    client_profile=client_profile,
+                    success=False,
+                    status=status,
+                    message=message,
+                    app_version=app_version,
+                )
+            )
+
+        nonce = pre_data.get("n")
+        if not nonce:
+            _LOGGER.debug(
+                "Hoymiles pre-insp returned keys %s for %s",
+                sorted(pre_data.keys()),
+                method_name,
+            )
+            return self._record_auth_failure(
+                AuthAttempt(
+                    method=method_name,
+                    client_profile=client_profile,
+                    success=False,
+                    message=(
+                        "Argon2 pre-inspection returned incomplete data "
+                        f"(keys: {sorted(pre_data.keys())})"
+                    ),
+                    app_version=app_version,
+                )
+            )
+
+        return pre_data, nonce
+
+    async def _login_v3_candidate(
+        self,
+        *,
+        client_profile: str,
+        method_name: str,
+        headers: dict[str, str],
+        app_version: str | None,
+        credential_hash: str,
+        nonce: str,
+        variant_name: str,
+    ) -> AuthAttempt:
+        """Attempt a single v3 login candidate."""
+        try:
+            async with self._session.post(
+                API_AUTH_V3_URL,
+                headers=headers,
+                json={"u": self._username, "ch": credential_hash, "n": nonce},
+            ) as response:
+                resp = await response.json()
+        except Exception as e:
+            _LOGGER.debug("Argon2 login request failed: %s", e)
+            return self._record_auth_failure(
+                AuthAttempt(
+                    method=method_name,
+                    client_profile=client_profile,
+                    success=False,
+                    message=str(e),
+                    app_version=app_version,
+                    variant=variant_name,
+                )
+            )
+
+        if resp.get("status") == "0" and resp.get("message") == "success":
+            return AuthAttempt(
+                method=method_name,
+                client_profile=client_profile,
+                success=True,
+                token=resp.get("data", {}).get("token"),
+                app_version=app_version,
+                variant=variant_name,
+            )
+
+        return self._record_auth_failure(
+            AuthAttempt(
+                method=method_name,
+                client_profile=client_profile,
+                success=False,
+                status=str(resp.get("status")) if resp.get("status") is not None else None,
+                message=resp.get("message"),
+                app_version=app_version,
+                variant=variant_name,
+            )
+        )
 
     async def _authenticate_v3(self, *, client_profile: str) -> AuthAttempt:
         """Authenticate using the modern browser flow (API v3).
@@ -173,8 +399,10 @@ class HoymilesAPI:
 
         - If ``a`` is present, compute an Argon2id hash from the password and
           salt, then submit that hex digest as ``ch``.
-        - If ``a`` is ``null``, mimic the browser's fallback and submit
-          ``ch = md5(password) + "." + base64(sha256(password))``.
+        - If ``a`` is ``null``, try the observed browser no-salt variants in
+          sequence, including the dotted ``md5(password) + "." +
+          base64(sha256(password))`` form and a plain ``sha256(password)``
+          hex digest.
 
         In both cases, send the returned nonce ``n`` back to
         ``/iam/pub/3/auth/login`` and use the resulting token directly in the
@@ -192,53 +420,22 @@ class HoymilesAPI:
         except ImportError:
             _LOGGER.debug("argon2-cffi not available, will only use unsalted v3 auth")
 
-        headers = self._json_headers(client_profile=client_profile)
-        method_name = (
-            AUTH_MODE_MOBILE_V3 if client_profile == CLIENT_PROFILE_MOBILE else AUTH_MODE_WEB_V3
-        )
+        method_name = self._get_auth_mode_for_profile(client_profile)
+        app_version = self._resolve_app_version(client_profile)
+        headers = self._json_headers(client_profile=client_profile, app_version=app_version)
 
         # Step 1: Pre-inspection — get server-provided salt and nonce
-        try:
-            async with self._session.post(
-                API_AUTH_PRE_INSP_URL,
-                headers=headers,
-                json={"u": self._username},
-            ) as response:
-                pre_resp = await response.json()
-        except Exception as e:
-            _LOGGER.debug("Argon2 pre-inspection request failed: %s", e)
-            return self._record_auth_failure(
-                AuthAttempt(
-                    method=method_name,
-                    client_profile=client_profile,
-                    success=False,
-                    message=str(e),
-                )
-            )
+        pre_insp_result = await self._pre_inspect_v3(
+            client_profile=client_profile,
+            method_name=method_name,
+            headers=headers,
+            app_version=app_version,
+        )
+        if isinstance(pre_insp_result, AuthAttempt):
+            return pre_insp_result
 
-        if pre_resp.get("status") != "0":
-            return self._record_auth_failure(
-                AuthAttempt(
-                    method=method_name,
-                    client_profile=client_profile,
-                    success=False,
-                    status=str(pre_resp.get("status")) if pre_resp.get("status") is not None else None,
-                    message=pre_resp.get("message"),
-                )
-            )
-
-        pre_data = pre_resp.get("data", {})
+        pre_data, nonce = pre_insp_result
         salt_b64 = pre_data.get("a")
-        nonce = pre_data.get("n")
-        if not nonce:
-            return self._record_auth_failure(
-                AuthAttempt(
-                    method=method_name,
-                    client_profile=client_profile,
-                    success=False,
-                    message="Argon2 pre-inspection returned incomplete data",
-                )
-            )
 
         # Step 2: Build the browser-style credential hash for the returned variant.
         try:
@@ -250,6 +447,7 @@ class HoymilesAPI:
                             client_profile=client_profile,
                             success=False,
                             message="Argon2 support is unavailable for salted v3 authentication",
+                            app_version=app_version,
                         )
                     )
 
@@ -266,10 +464,7 @@ class HoymilesAPI:
                 ch = raw_hash.hex()
                 auth_method = "argon2_v3"
             else:
-                md5_password = hashlib.md5(self._password.encode()).hexdigest()
-                sha256_password = hashlib.sha256(self._password.encode()).digest()
-                ch = f"{md5_password}.{base64.b64encode(sha256_password).decode()}"
-                auth_method = "sha256_v3"
+                unsalted_candidates = self._build_unsalted_v3_candidates()
         except Exception as e:
             _LOGGER.debug("Modern v3 hashing failed: %s", e)
             return self._record_auth_failure(
@@ -278,43 +473,57 @@ class HoymilesAPI:
                     client_profile=client_profile,
                     success=False,
                     message=str(e),
+                    app_version=app_version,
                 )
             )
 
-        # Step 3: Login with Argon2 credentials
-        try:
-            async with self._session.post(
-                API_AUTH_V3_URL,
-                headers=headers,
-                json={"u": self._username, "ch": ch, "n": nonce},
-            ) as response:
-                resp = await response.json()
-        except Exception as e:
-            _LOGGER.debug("Argon2 login request failed: %s", e)
-            return self._record_auth_failure(
-                AuthAttempt(
-                    method=method_name,
-                    client_profile=client_profile,
-                    success=False,
-                    message=str(e),
-                )
-            )
-
-        if resp.get("status") == "0" and resp.get("message") == "success":
-            return AuthAttempt(
-                method=auth_method,
+        # Step 3: Login with the derived credentials.
+        if salt_b64:
+            return await self._login_v3_candidate(
                 client_profile=client_profile,
-                success=True,
-                token=resp.get("data", {}).get("token"),
+                method_name=method_name,
+                headers=headers,
+                app_version=app_version,
+                credential_hash=ch,
+                nonce=nonce,
+                variant_name=auth_method,
             )
 
-        return self._record_auth_failure(
+        last_failure: AuthAttempt | None = None
+        for index, (variant_name, candidate_hash) in enumerate(unsalted_candidates):
+            if index > 0:
+                retry_pre_insp_result = await self._pre_inspect_v3(
+                    client_profile=client_profile,
+                    method_name=method_name,
+                    headers=headers,
+                    app_version=app_version,
+                )
+                if isinstance(retry_pre_insp_result, AuthAttempt):
+                    return retry_pre_insp_result
+                _, nonce = retry_pre_insp_result
+
+            attempt = await self._login_v3_candidate(
+                client_profile=client_profile,
+                method_name=method_name,
+                headers=headers,
+                app_version=app_version,
+                credential_hash=candidate_hash,
+                nonce=nonce,
+                variant_name=variant_name,
+            )
+            if attempt.success:
+                return attempt
+            last_failure = attempt
+            if not self._should_retry_unsalted_variant(attempt.status, attempt.message):
+                return attempt
+
+        return last_failure or self._record_auth_failure(
             AuthAttempt(
                 method=method_name,
                 client_profile=client_profile,
                 success=False,
-                status=str(resp.get("status")) if resp.get("status") is not None else None,
-                message=resp.get("message"),
+                message="No unsalted v3 auth candidates were available",
+                app_version=app_version,
             )
         )
 
@@ -360,32 +569,29 @@ class HoymilesAPI:
             )
         )
 
-    async def authenticate(self, auth_mode: str = AUTH_MODE_AUTO) -> bool:
+    async def authenticate(self, auth_mode: str | None = None) -> bool:
         """Authenticate with the Hoymiles API.
 
         Tries supported auth strategies while preserving the most informative
         failure if all strategies fail.
         """
         try:
+            selected_auth_mode = auth_mode or self._auth_mode_preference
             self._auth_method = None
             self._last_auth_status = None
             self._last_auth_message = None
             self._last_auth_error_key = None
             self._last_auth_attempt = None
             self._last_auth_attempts = []
+            self._active_client_profile = CLIENT_PROFILE_WEB
+            self._active_app_version = None
 
-            if auth_mode == AUTH_MODE_WEB_V3:
-                attempts = [await self._authenticate_v3(client_profile=CLIENT_PROFILE_WEB)]
-            elif auth_mode == AUTH_MODE_MOBILE_V3:
-                attempts = [await self._authenticate_v3(client_profile=CLIENT_PROFILE_MOBILE)]
-            elif auth_mode == AUTH_MODE_LEGACY_V0:
-                attempts = [await self._authenticate_legacy()]
-            else:
-                attempts = [
-                    await self._authenticate_v3(client_profile=CLIENT_PROFILE_WEB),
-                    await self._authenticate_v3(client_profile=CLIENT_PROFILE_MOBILE),
-                    await self._authenticate_legacy(),
-                ]
+            attempts: list[AuthAttempt] = []
+            for attempt_mode, client_profile in self._build_auth_attempts(selected_auth_mode):
+                if attempt_mode == AUTH_MODE_LEGACY_V0:
+                    attempts.append(await self._authenticate_legacy())
+                else:
+                    attempts.append(await self._authenticate_v3(client_profile=client_profile))
 
             self._last_auth_attempts = attempts
             for attempt in attempts:
@@ -395,6 +601,7 @@ class HoymilesAPI:
             preferred_failure = choose_preferred_failure(attempts)
             if preferred_failure is not None:
                 self._record_auth_failure(preferred_failure)
+            _LOGGER.warning("Hoymiles auth failed after attempts: %s", self.last_auth_attempt_summary)
             return False
         except Exception as e:
             _LOGGER.error("Error during authentication: %s", e)

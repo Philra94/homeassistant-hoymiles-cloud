@@ -14,17 +14,35 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .auth import AUTH_ERROR_NO_ACCESSIBLE_STATIONS, auth_error_to_config_error
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import AUTH_MODE_AUTO, AUTH_MODE_OPTIONS, CONF_APP_VERSION, CONF_AUTH_MODE, DEFAULT_SCAN_INTERVAL, DOMAIN
 from .hoymiles_api import HoymilesAPI
 
 _LOGGER = logging.getLogger(__name__)
 
-STEP_USER_DATA_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_USERNAME): str,
-        vol.Required(CONF_PASSWORD): str,
-    }
-)
+def _normalize_app_version(value: Any) -> str | None:
+    """Normalize an optional app-version override."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _build_user_schema(
+    default_auth_mode: str = AUTH_MODE_AUTO,
+    default_app_version: str | None = None,
+) -> vol.Schema:
+    """Build the initial config-flow schema."""
+    return vol.Schema(
+        {
+            vol.Required(CONF_USERNAME): str,
+            vol.Required(CONF_PASSWORD): str,
+            vol.Required(CONF_AUTH_MODE, default=default_auth_mode): vol.In(AUTH_MODE_OPTIONS),
+            vol.Optional(CONF_APP_VERSION, default=default_app_version or ""): str,
+        }
+    )
+
+
+STEP_USER_DATA_SCHEMA = _build_user_schema()
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -47,24 +65,31 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             username = user_input[CONF_USERNAME]
             password = user_input[CONF_PASSWORD]
+            auth_mode = user_input.get(CONF_AUTH_MODE, AUTH_MODE_AUTO)
+            app_version = _normalize_app_version(user_input.get(CONF_APP_VERSION))
 
             session = async_get_clientsession(self.hass)
             api = HoymilesAPI(session, username, password)
+            api.configure_auth(auth_mode=auth_mode, app_version=app_version)
 
             try:
                 # Test authentication
                 authenticated = await api.authenticate()
                 if not authenticated:
                     _LOGGER.error(
-                        "Hoymiles authentication rejected via %s: %s - %s",
+                        "Hoymiles authentication rejected via %s: %s - %s (%s)",
                         api.last_auth_attempt,
                         api.last_auth_status,
                         api.last_auth_message,
+                        api.last_auth_attempt_summary,
                     )
                     errors["base"] = auth_error_to_config_error(api.last_auth_error_key)
                     return self.async_show_form(
                         step_id="user",
-                        data_schema=STEP_USER_DATA_SCHEMA,
+                        data_schema=_build_user_schema(
+                            default_auth_mode=auth_mode,
+                            default_app_version=app_version,
+                        ),
                         errors=errors,
                     )
 
@@ -97,6 +122,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     },
                     options={
                         CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
+                        CONF_AUTH_MODE: auth_mode,
+                        CONF_APP_VERSION: app_version or "",
                     },
                 )
 
@@ -119,6 +146,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(self, user_input=None):
         """Manage the options."""
         if user_input is not None:
+            user_input[CONF_APP_VERSION] = _normalize_app_version(user_input.get(CONF_APP_VERSION)) or ""
             return self.async_create_entry(title="", data=user_input)
 
         return self.async_show_form(
@@ -131,6 +159,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
                         ),
                     ): vol.All(vol.Coerce(int), vol.Range(min=30, max=3600)),
+                    vol.Required(
+                        CONF_AUTH_MODE,
+                        default=self.config_entry.options.get(CONF_AUTH_MODE, AUTH_MODE_AUTO),
+                    ): vol.In(AUTH_MODE_OPTIONS),
+                    vol.Optional(
+                        CONF_APP_VERSION,
+                        default=self.config_entry.options.get(CONF_APP_VERSION, ""),
+                    ): str,
                 }
             ),
         ) 

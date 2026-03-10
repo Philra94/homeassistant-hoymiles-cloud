@@ -81,13 +81,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--auth-mode",
         default="auto",
-        choices=("auto", "web_v3", "mobile_v3", "legacy_v0"),
+        choices=("auto", "web_v3", "installer_v3", "home_v3", "legacy_v0"),
         help="Authentication strategy to test. Defaults to auto.",
     )
     parser.add_argument(
-        "--mobile-app-version",
+        "--app-version",
         default=None,
-        help="Override the mobile client version used for mobile-profile auth attempts.",
+        help="Override the app version used for installer/home auth attempts.",
+    )
+    parser.add_argument(
+        "--mobile-app-version",
+        dest="app_version",
+        default=None,
+        help="Deprecated alias for --app-version.",
+    )
+    parser.add_argument(
+        "--try-matrix",
+        action="store_true",
+        help="Run a small auth/profile matrix instead of a single attempt.",
     )
     return parser
 
@@ -145,9 +156,29 @@ async def main() -> int:
 
     async with aiohttp.ClientSession() as session:
         api = HoymilesAPI(session, username, password)
-        if args.mobile_app_version:
-            api._mobile_app_version = args.mobile_app_version
-        authenticated = await api.authenticate(auth_mode=args.auth_mode)
+        api.configure_auth(auth_mode=args.auth_mode, app_version=args.app_version)
+
+        if args.try_matrix:
+            matrix = [
+                ("web_v3", None),
+                ("installer_v3", args.app_version or "3.7.1"),
+                ("home_v3", args.app_version or "2.8.0"),
+                ("legacy_v0", None),
+            ]
+            overall_success = False
+            print("Trying auth matrix...")
+            for auth_mode, app_version in matrix:
+                api.configure_auth(auth_mode=auth_mode, app_version=app_version)
+                authenticated = await api.authenticate()
+                status = "OK" if authenticated else "FAILED"
+                detail = api.auth_method if authenticated else api.last_auth_attempt_summary
+                version_suffix = f" (app_version={app_version})" if app_version else ""
+                print(f"- {auth_mode}{version_suffix}: {status} -> {detail}")
+                if authenticated:
+                    overall_success = True
+            return 0 if overall_success else 1
+
+        authenticated = await api.authenticate()
 
         if not authenticated:
             print("Authentication: FAILED")
@@ -156,6 +187,7 @@ async def main() -> int:
             print(f"Error key: {api.last_auth_error_key or '<none>'}")
             print(f"API status: {api.last_auth_status or '<none>'}")
             print(f"API message: {api.last_auth_message or '<none>'}")
+            print(f"Attempts: {api.last_auth_attempt_summary}")
             return 1
 
         print("Authentication: OK")

@@ -24,15 +24,51 @@ API_BATTERY_SETTINGS_STATUS_URL = f"{API_BASE_URL}/pvm-ctl/api/0/dev/setting/sta
 # Authentication modes / client profiles
 AUTH_MODE_AUTO = "auto"
 AUTH_MODE_WEB_V3 = "web_v3"
-AUTH_MODE_MOBILE_V3 = "mobile_v3"
+AUTH_MODE_INSTALLER_V3 = "installer_v3"
+AUTH_MODE_HOME_V3 = "home_v3"
 AUTH_MODE_LEGACY_V0 = "legacy_v0"
 
 CLIENT_PROFILE_WEB = "web"
-CLIENT_PROFILE_MOBILE = "mobile"
+CLIENT_PROFILE_INSTALLER = "installer"
+CLIENT_PROFILE_HOME = "home"
 
-DEFAULT_MOBILE_APP_VERSION = "3.7.0"
 DEFAULT_WEB_USER_AGENT = "HomeAssistant-HoymilesCloud"
-DEFAULT_MOBILE_USER_AGENT = "S-Miles Home"
+DEFAULT_INSTALLER_USER_AGENT = "S-Miles Installer"
+DEFAULT_HOME_USER_AGENT = "S-Miles Home"
+DEFAULT_INSTALLER_APP_VERSION = "3.7.1"
+DEFAULT_HOME_APP_VERSION = "2.8.0"
+
+AUTH_PROFILE_DEFAULTS = {
+    CLIENT_PROFILE_WEB: {
+        "user_agent": DEFAULT_WEB_USER_AGENT,
+        "app_version": None,
+        "x_client_type": None,
+    },
+    CLIENT_PROFILE_INSTALLER: {
+        "user_agent": DEFAULT_INSTALLER_USER_AGENT,
+        "app_version": DEFAULT_INSTALLER_APP_VERSION,
+        "x_client_type": "mobile",
+    },
+    CLIENT_PROFILE_HOME: {
+        "user_agent": DEFAULT_HOME_USER_AGENT,
+        "app_version": DEFAULT_HOME_APP_VERSION,
+        "x_client_type": "mobile",
+    },
+}
+
+AUTH_MODE_TO_PROFILE = {
+    AUTH_MODE_WEB_V3: CLIENT_PROFILE_WEB,
+    AUTH_MODE_INSTALLER_V3: CLIENT_PROFILE_INSTALLER,
+    AUTH_MODE_HOME_V3: CLIENT_PROFILE_HOME,
+}
+
+AUTH_MODE_OPTIONS = {
+    AUTH_MODE_AUTO: "Auto-detect",
+    AUTH_MODE_WEB_V3: "S-Miles Cloud Web",
+    AUTH_MODE_INSTALLER_V3: "S-Miles Installer",
+    AUTH_MODE_HOME_V3: "S-Miles Home",
+    AUTH_MODE_LEGACY_V0: "Legacy v0",
+}
 
 # Battery Modes
 BATTERY_MODE_SELF_CONSUMPTION = 1
@@ -57,6 +93,8 @@ DEFAULT_SCAN_INTERVAL = 60  # seconds
 
 # Configuration
 CONF_STATION_ID = "station_id"
+CONF_AUTH_MODE = "auth_mode"
+CONF_APP_VERSION = "app_version"
 
 # Sensor types
 SENSOR_TYPE_POWER = "power"

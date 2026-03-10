@@ -11,7 +11,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, STORAGE_KEY, STORAGE_VERSION
+from .const import AUTH_MODE_AUTO, CONF_APP_VERSION, CONF_AUTH_MODE, DEFAULT_SCAN_INTERVAL, DOMAIN, STORAGE_KEY, STORAGE_VERSION
 from .data import MODE_KEY_MAPPING, battery_settings_readable, build_station_capabilities
 from .hoymiles_api import HoymilesAPI
 
@@ -83,9 +83,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     username = entry.data[CONF_USERNAME]
     password = entry.data[CONF_PASSWORD]
     scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    auth_mode = entry.options.get(CONF_AUTH_MODE, AUTH_MODE_AUTO)
+    app_version = entry.options.get(CONF_APP_VERSION) or None
 
     session = async_get_clientsession(hass)
     api = HoymilesAPI(session, username, password)
+    api.configure_auth(auth_mode=auth_mode, app_version=app_version)
     store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
     stored_data = await store.async_load() or {}
 
@@ -96,7 +99,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if not auth_result:
         raise ConfigEntryAuthFailed(
-            f"Hoymiles authentication failed: {api.last_auth_status} - {api.last_auth_message}"
+            "Hoymiles authentication failed: "
+            f"{api.last_auth_status} - {api.last_auth_message} "
+            f"({api.last_auth_attempt_summary})"
         )
 
     try:
@@ -116,7 +121,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             async with async_timeout.timeout(30):
                 if api.is_token_expired() and not await api.authenticate():
                     raise ConfigEntryAuthFailed(
-                        f"Hoymiles authentication failed: {api.last_auth_status} - {api.last_auth_message}"
+                        "Hoymiles authentication failed: "
+                        f"{api.last_auth_status} - {api.last_auth_message} "
+                        f"({api.last_auth_attempt_summary})"
                     )
 
                 refreshed: dict[str, dict] = {}
