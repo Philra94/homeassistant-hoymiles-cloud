@@ -232,6 +232,24 @@ def test_home_profile_headers_include_version_metadata() -> None:
     assert headers["X-Client-Type"] == "mobile"
 
 
+def test_decode_v3_salt_prefers_hex_browser_format() -> None:
+    """Salt values observed in the browser should decode from hex."""
+    api = HoymilesAPI(FakeSession([]), "user@example.com", "secret")
+
+    salt = api._decode_v3_salt("d5e3f019748d7a36d69840fdfd873d15")
+
+    assert salt == bytes.fromhex("d5e3f019748d7a36d69840fdfd873d15")
+
+
+def test_decode_v3_salt_still_accepts_base64() -> None:
+    """Legacy assumptions about base64 salts should remain supported."""
+    api = HoymilesAPI(FakeSession([]), "user@example.com", "secret")
+
+    salt = api._decode_v3_salt("YWJjZA==")
+
+    assert salt == b"abcd"
+
+
 def test_configured_auth_preferences_affect_future_attempts() -> None:
     """Configured auth preferences should affect subsequent authenticate calls."""
     session = FakeSession(

@@ -6,9 +6,7 @@
         "description": "Enter your Hoymiles Cloud credentials",
         "data": {
           "username": "Username (Email)",
-          "password": "Password",
-          "auth_mode": "Authentication profile",
-          "app_version": "App version override (advanced)"
+          "password": "Password"
         }
       }
     },
@@ -31,9 +29,7 @@
         "title": "Hoymiles Cloud Options",
         "description": "Configure the integration options",
         "data": {
-          "scan_interval": "Data update interval (seconds)",
-          "auth_mode": "Authentication profile",
-          "app_version": "App version override (advanced)"
+          "scan_interval": "Data update interval (seconds)"
         }
       }
     }

@@ -38,8 +38,8 @@ docker compose -f resources/home-assistant-test/docker-compose.yml up -d
 ```
 
 3. Open `http://127.0.0.1:8123`, add or reconfigure the `Hoymiles Cloud`
-   integration, and if needed apply the same `Authentication profile` and
-   `App version override (advanced)` that worked in the script.
+   integration, and verify that the automatic login flow succeeds with the
+   target account.
 
 4. Inspect logs when troubleshooting:
 

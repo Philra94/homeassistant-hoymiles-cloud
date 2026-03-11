@@ -11,7 +11,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import AUTH_MODE_AUTO, CONF_APP_VERSION, CONF_AUTH_MODE, DEFAULT_SCAN_INTERVAL, DOMAIN, STORAGE_KEY, STORAGE_VERSION
+from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, STORAGE_KEY, STORAGE_VERSION
 from .data import MODE_KEY_MAPPING, battery_settings_readable, build_station_capabilities
 from .hoymiles_api import HoymilesAPI
 
@@ -83,12 +83,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     username = entry.data[CONF_USERNAME]
     password = entry.data[CONF_PASSWORD]
     scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-    auth_mode = entry.options.get(CONF_AUTH_MODE, AUTH_MODE_AUTO)
-    app_version = entry.options.get(CONF_APP_VERSION) or None
 
     session = async_get_clientsession(hass)
     api = HoymilesAPI(session, username, password)
-    api.configure_auth(auth_mode=auth_mode, app_version=app_version)
     store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
     stored_data = await store.async_load() or {}
 
