@@ -1,6 +1,7 @@
 """API client for Hoymiles Cloud."""
 import asyncio
 import base64
+import binascii
 from copy import deepcopy
 import hashlib
 import json
@@ -274,6 +275,21 @@ class HoymilesAPI:
             ),
         ]
 
+    def _decode_v3_salt(self, salt_value: str) -> bytes:
+        """Decode a v3 salt value from the observed browser/API formats."""
+        normalized = salt_value.strip()
+        try:
+            # Browser captures showed a plain hex string for salted web logins.
+            if len(normalized) % 2 == 0:
+                return bytes.fromhex(normalized)
+        except ValueError:
+            pass
+
+        try:
+            return base64.b64decode(normalized, validate=True)
+        except (binascii.Error, ValueError):
+            return normalized.encode()
+
     async def _pre_inspect_v3(
         self,
         *,
@@ -451,7 +467,7 @@ class HoymilesAPI:
                         )
                     )
 
-                salt = base64.b64decode(salt_b64)
+                salt = self._decode_v3_salt(salt_b64)
                 raw_hash = hash_secret_raw(
                     secret=self._password.encode(),
                     salt=salt,
