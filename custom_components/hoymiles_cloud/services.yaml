@@ -1,0 +1,72 @@
+set_battery_mode:
+  name: Set battery mode
+  description: Activate a Hoymiles battery mode for a station.
+  fields:
+    station_id:
+      name: Station ID
+      description: Hoymiles station identifier.
+      required: true
+      selector:
+        text:
+    mode:
+      name: Mode
+      description: Battery mode id to activate. Supported values are 1, 2, 3, 4, 7, and 8.
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 8
+          step: 1
+          mode: box
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Home Assistant config entry id when the same station id exists in more than one Hoymiles account.
+      required: false
+      selector:
+        text:
+
+set_battery_mode_settings:
+  name: Set battery mode settings
+  description: >
+    Update the structured payload for a Hoymiles battery mode and activate that mode.
+    This is intended for advanced settings such as Economy and Time of Use schedules.
+  fields:
+    station_id:
+      name: Station ID
+      description: Hoymiles station identifier.
+      required: true
+      selector:
+        text:
+    mode:
+      name: Mode
+      description: Battery mode id to update. Supported values are 1, 2, 3, 4, 7, and 8.
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 8
+          step: 1
+          mode: box
+    settings:
+      name: Settings payload
+      description: >
+        Dictionary merged into the live Hoymiles mode payload by default. Lists replace the
+        existing values, so provide a full schedule array when updating Economy or Time of Use.
+      required: true
+      selector:
+        object:
+    merge:
+      name: Merge with existing mode payload
+      description: >
+        When enabled, only the provided keys are replaced and all other keys from the live
+        Hoymiles payload are preserved.
+      required: false
+      default: true
+      selector:
+        boolean:
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Home Assistant config entry id when the same station id exists in more than one Hoymiles account.
+      required: false
+      selector:
+        text:

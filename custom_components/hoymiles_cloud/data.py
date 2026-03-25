@@ -4,6 +4,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .const import BATTERY_MODE_IDS, BATTERY_SCHEDULE_MODE_IDS
+
 
 MODE_KEY_MAPPING = {
     1: "k_1",
@@ -45,14 +47,10 @@ def battery_settings_writable(battery_settings: dict[str, Any] | None) -> bool:
     return bool(battery_settings and battery_settings.get("writable"))
 
 
-def get_supported_modes(battery_settings: dict[str, Any] | None) -> list[int]:
-    """Return supported battery mode IDs from the payload."""
+def get_backend_modes(battery_settings: dict[str, Any] | None) -> list[int]:
+    """Return all backend mode ids present in the raw payload."""
     if not battery_settings:
         return []
-
-    available_modes = battery_settings.get("available_modes")
-    if isinstance(available_modes, list):
-        return [mode for mode in available_modes if isinstance(mode, int)]
 
     mode_data = battery_settings.get("mode_data", {})
     supported_modes: list[int] = []
@@ -63,6 +61,18 @@ def get_supported_modes(battery_settings: dict[str, Any] | None) -> list[int]:
             except ValueError:
                 continue
     return sorted(set(supported_modes))
+
+
+def get_supported_modes(battery_settings: dict[str, Any] | None) -> list[int]:
+    """Return known battery mode IDs supported by the integration."""
+    if not battery_settings:
+        return []
+
+    available_modes = battery_settings.get("available_modes")
+    if isinstance(available_modes, list):
+        return [mode for mode in available_modes if isinstance(mode, int) and mode in BATTERY_MODE_IDS]
+
+    return [mode for mode in get_backend_modes(battery_settings) if mode in BATTERY_MODE_IDS]
 
 
 def get_mode_settings(
@@ -78,6 +88,27 @@ def get_mode_settings(
         return {}
 
     return deepcopy(battery_settings.get("mode_data", {}).get(mode_key, {}))
+
+
+def get_current_battery_mode(battery_settings: dict[str, Any] | None) -> int | None:
+    """Return the active battery mode id."""
+    mode = (battery_settings or {}).get("data", {}).get("mode")
+    return mode if isinstance(mode, int) else None
+
+
+def mode_supports_schedule(mode: int) -> bool:
+    """Return whether a battery mode uses a schedule payload."""
+    return mode in BATTERY_SCHEDULE_MODE_IDS
+
+
+def get_schedule_modes(battery_settings: dict[str, Any] | None) -> list[int]:
+    """Return known schedule-bearing modes exposed by the current payload."""
+    return [mode for mode in get_supported_modes(battery_settings) if mode_supports_schedule(mode)]
+
+
+def mode_fields(battery_settings: dict[str, Any] | None, mode: int) -> list[str]:
+    """Return the sorted top-level fields present in a mode payload."""
+    return sorted(get_mode_settings(battery_settings, mode).keys())
 
 
 def get_pv_indicator_value(
@@ -133,4 +164,6 @@ def build_station_capabilities(
         "microinverter_details_available": bool(microinverters_data),
         "microinverter_detail_count": len(microinverters_data or {}),
         "supported_battery_modes": get_supported_modes(battery_settings),
+        "backend_battery_modes": get_backend_modes(battery_settings),
+        "battery_schedule_modes": get_schedule_modes(battery_settings),
     }

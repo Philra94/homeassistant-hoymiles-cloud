@@ -18,12 +18,14 @@ This custom integration for Home Assistant allows you to monitor and control you
   - Set battery operation mode when the account exposes writable battery settings
   - Configure battery reserve state of charge for the modes returned by the account
   - Peak Shaving Mode specific settings (`max_soc`, `meter_power`) when supported
+  - Advanced battery mode payload updates through Home Assistant services for Economy and Time of Use schedules
 
 ## Development Status
 
 This integration focuses on safe production use:
 - Read-only telemetry should still work even if the account cannot access battery settings
 - Controls are only exposed when the Hoymiles account returns writable settings data
+- Battery setting reads and writes now follow the observed async Hoymiles `read/write -> job id -> status poll` flow
 - Station discovery supports accounts with more than one page of stations
 - Authentication now preserves more specific Hoymiles failure reasons instead of flattening them into a generic login error
 
@@ -73,12 +75,21 @@ The integration creates PV input sensors from the indicator keys returned by the
 
 The sensors will update every minute by default, but this can be changed in the integration options.
 
+### Advanced battery services
+
+For structured battery settings that are awkward to model as individual entities, the integration also registers two services:
+
+- `hoymiles_cloud.set_battery_mode`
+- `hoymiles_cloud.set_battery_mode_settings`
+
+`set_battery_mode_settings` accepts a raw settings dictionary and merges it into the live Hoymiles mode payload by default. This is the recommended path for advanced Economy (`mode: 2`) and Time of Use (`mode: 8`) schedule updates because the backend expects the full mode payload to be preserved.
+
 ## Notes
 
 - The integration uses the modern Hoymiles v3 authentication flow with the observed browser-compatible hashing fallback.
 - Some accounts appear to require a different Hoymiles client/account family. If Hoymiles responds with messages like `Can only login to the S-Miles Home.` or `Your app version is low. Please update to the latest version.`, the integration now exposes those outcomes more clearly in the config flow and logs while still keeping the user-facing setup flow simple.
 - Some accounts expose live battery telemetry but deny access to battery settings. In that case the integration keeps the telemetry sensors and hides the unsupported controls.
-- Custom Time-of-Use schedule editing is not exposed right now. The previous custom schedule service path was removed because it was not reliably aligned with live API permissions and payload shapes.
+- Economy and Time-of-Use schedules are exposed through services instead of many per-slot entities because Hoymiles expects structured payloads and full schedule arrays.
 - API endpoints and payload structures are based on observed Hoymiles Cloud behavior and may still vary by region, account role, and hardware family.
 
 ## Contributing
