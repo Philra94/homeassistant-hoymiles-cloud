@@ -66,6 +66,31 @@
       },
       "total_energy": {
         "name": "Total Energy"
+      },
+      "schedule_editor_mode_status": {
+        "name": "Current Schedule Editor Mode"
+      },
+      "economy_schedule_summary": {
+        "name": "Economy Schedule Summary"
+      },
+      "time_of_use_schedule_summary": {
+        "name": "Time of Use Schedule Summary"
+      },
+      "economy_schedule_count": {
+        "name": "Economy Schedule Count"
+      },
+      "time_of_use_schedule_count": {
+        "name": "Time of Use Schedule Count"
+      },
+      "schedule_editor_validation": {
+        "name": "Schedule Editor Validation Status"
+      },
+      "schedule_editor_dirty": {
+        "name": "Schedule Editor Dirty State",
+        "state": {
+          "clean": "Clean",
+          "dirty": "Dirty"
+        }
       }
     },
     "select": {
@@ -79,6 +104,9 @@
           "time_of_use": "Time of Use",
           "backup": "Backup"
         }
+      },
+      "schedule_editor_mode": {
+        "name": "Schedule Editor Mode"
       }
     },
     "number": {

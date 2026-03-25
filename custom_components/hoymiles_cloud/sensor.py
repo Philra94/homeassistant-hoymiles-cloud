@@ -36,6 +36,14 @@ from .data import (
     get_supported_modes,
     get_pv_indicator_value,
 )
+from .schedule_editor import (
+    get_editor_state,
+    get_mode_entry_count,
+    get_mode_state,
+    get_selected_editor_mode,
+    get_selected_schedule_dirty,
+    get_selected_schedule_validation,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -376,6 +384,18 @@ async def async_setup_entry(
                     station_name=station_name,
                 )
             )
+        if station_data.get("schedule_editor", {}).get("available_modes"):
+            entities.extend(
+                [
+                    HoymilesScheduleEditorModeSensor(coordinator, station_id, station_name),
+                    HoymilesScheduleSummarySensor(coordinator, station_id, station_name, 2),
+                    HoymilesScheduleSummarySensor(coordinator, station_id, station_name, 8),
+                    HoymilesScheduleCountSensor(coordinator, station_id, station_name, 2),
+                    HoymilesScheduleCountSensor(coordinator, station_id, station_name, 8),
+                    HoymilesScheduleEditorValidationSensor(coordinator, station_id, station_name),
+                    HoymilesScheduleEditorDirtySensor(coordinator, station_id, station_name),
+                ]
+            )
 
         for channel in discover_pv_channels(station_data.get("pv_indicators", {})):
             entities.extend(
@@ -557,4 +577,133 @@ class HoymilesPVChannelSensor(HoymilesBaseSensor):
         return self.coordinator.last_update_success and has_pv_indicator(
             self._get_station_data(),
             self._indicator_key,
+        )
+
+
+class HoymilesScheduleEditorModeSensor(HoymilesBaseSensor):
+    """Diagnostic sensor for the selected schedule editor mode."""
+
+    def __init__(self, coordinator, station_id: str, station_name: str) -> None:
+        super().__init__(coordinator, station_id, station_name)
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_schedule_editor_mode_status"
+        self._attr_name = f"{station_name} Current Schedule Editor Mode"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the selected schedule editor mode."""
+        mode = get_selected_editor_mode(self._get_station_data())
+        return BATTERY_MODES.get(mode, f"Unknown ({mode})") if mode is not None else None
+
+    @property
+    def available(self) -> bool:
+        """Return whether a schedule editor mode exists."""
+        return self.coordinator.last_update_success and bool(
+            self._get_station_data().get("schedule_editor", {}).get("available_modes")
+        )
+
+
+class HoymilesScheduleSummarySensor(HoymilesBaseSensor):
+    """Sensor exposing a human-readable schedule summary for one mode."""
+
+    def __init__(self, coordinator, station_id: str, station_name: str, mode: int) -> None:
+        super().__init__(coordinator, station_id, station_name)
+        mode_label = "economy" if mode == 2 else "time_of_use"
+        self._mode = mode
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_{mode_label}_schedule_summary"
+        self._attr_name = f"{station_name} {'Economy' if mode == 2 else 'Time of Use'} Schedule Summary"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the schedule summary text."""
+        return get_mode_state(self._get_station_data(), self._mode).get("summary")
+
+    @property
+    def available(self) -> bool:
+        """Return whether the schedule mode is available."""
+        return self.coordinator.last_update_success and bool(get_mode_state(self._get_station_data(), self._mode))
+
+
+class HoymilesScheduleCountSensor(HoymilesBaseSensor):
+    """Sensor exposing the number of schedule rows for one mode."""
+
+    def __init__(self, coordinator, station_id: str, station_name: str, mode: int) -> None:
+        super().__init__(coordinator, station_id, station_name)
+        mode_label = "economy" if mode == 2 else "time_of_use"
+        self._mode = mode
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_{mode_label}_schedule_count"
+        self._attr_name = f"{station_name} {'Economy' if mode == 2 else 'Time of Use'} Schedule Count"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self) -> int:
+        """Return the number of top-level schedule rows."""
+        return get_mode_entry_count(self._get_station_data(), self._mode)
+
+    @property
+    def available(self) -> bool:
+        """Return whether the schedule mode is available."""
+        return self.coordinator.last_update_success and bool(get_mode_state(self._get_station_data(), self._mode))
+
+
+class HoymilesScheduleEditorValidationSensor(HoymilesBaseSensor):
+    """Sensor exposing current schedule draft validation state."""
+
+    def __init__(self, coordinator, station_id: str, station_name: str) -> None:
+        super().__init__(coordinator, station_id, station_name)
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_schedule_editor_validation"
+        self._attr_name = f"{station_name} Schedule Editor Validation Status"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self) -> str:
+        """Return the current validation status."""
+        return get_selected_schedule_validation(self._get_station_data())
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the full validation error list for the selected mode."""
+        editor_state = get_editor_state(self._get_station_data())
+        return {
+            "errors": editor_state.get("validation_errors", []),
+            "selected_mode": editor_state.get("selected_mode"),
+        }
+
+    @property
+    def available(self) -> bool:
+        """Return whether schedule editor data is available."""
+        return self.coordinator.last_update_success and bool(
+            self._get_station_data().get("schedule_editor", {}).get("available_modes")
+        )
+
+
+class HoymilesScheduleEditorDirtySensor(HoymilesBaseSensor):
+    """Sensor exposing whether the selected draft differs from the live payload."""
+
+    def __init__(self, coordinator, station_id: str, station_name: str) -> None:
+        super().__init__(coordinator, station_id, station_name)
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_schedule_editor_dirty"
+        self._attr_name = f"{station_name} Schedule Editor Dirty State"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self) -> str:
+        """Return clean or dirty for the selected schedule draft."""
+        return "dirty" if get_selected_schedule_dirty(self._get_station_data()) else "clean"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose aggregate dirty information across schedule modes."""
+        editor_state = get_editor_state(self._get_station_data())
+        return {
+            "dirty": editor_state.get("dirty", False),
+            "selected_mode": editor_state.get("selected_mode"),
+        }
+
+    @property
+    def available(self) -> bool:
+        """Return whether schedule editor data is available."""
+        return self.coordinator.last_update_success and bool(
+            self._get_station_data().get("schedule_editor", {}).get("available_modes")
         )
