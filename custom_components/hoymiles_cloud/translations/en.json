@@ -73,6 +73,9 @@
         "name": "Battery Mode",
         "state": {
           "self_consumption": "Self Consumption",
+          "economy": "Economy",
+          "off_grid": "Off Grid",
+          "peak_shaving": "Peak Shaving",
           "time_of_use": "Time of Use",
           "backup": "Backup"
         }

@@ -154,9 +154,11 @@ class HoymilesBatteryReserveSOC(HoymilesBatteryNumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Set the value."""
-        if not await self._api.set_battery_mode(self._station_id, self._mode):
-            return
-        if not await self._api.set_reserve_soc(self._station_id, int(value)):
+        if not await self._api.set_battery_mode_settings(
+            self._station_id,
+            self._mode,
+            {"reserve_soc": int(value)},
+        ):
             return
 
         await self._update_soc(self._station_id, self._get_storage_key(), int(value))

@@ -25,6 +25,8 @@ from .const import (
     API_BATTERY_SETTINGS_READ_URL,
     API_BATTERY_SETTINGS_WRITE_URL,
     API_BATTERY_SETTINGS_STATUS_URL,
+    BATTERY_MODE_ECONOMY,
+    BATTERY_MODE_IDS,
     BATTERY_MODE_SELF_CONSUMPTION,
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_MODE_BACKUP,
@@ -52,12 +54,18 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_MODE_SETTINGS: dict[int, dict[str, Any]] = {
     BATTERY_MODE_SELF_CONSUMPTION: {"reserve_soc": 10},
-    2: {"reserve_soc": 0, "money_code": "$", "date": []},
+    BATTERY_MODE_ECONOMY: {"reserve_soc": 10, "money_code": "$", "date": []},
     BATTERY_MODE_BACKUP: {"reserve_soc": 100},
     4: {},
     7: {"reserve_soc": 30, "max_soc": 70, "meter_power": 3000},
     BATTERY_MODE_TIME_OF_USE: {"reserve_soc": 10},
 }
+
+BATTERY_SETTINGS_ACTION_ID = 1013
+BATTERY_SETTINGS_STATUS_RUNNING = 2
+BATTERY_SETTINGS_STATUS_SUCCESS = 0
+BATTERY_SETTINGS_MAX_POLLS = 10
+BATTERY_SETTINGS_POLL_INTERVAL = 1.0
 
 
 class HoymilesAPI:
@@ -864,86 +872,163 @@ class HoymilesAPI:
         """Get battery settings for a station."""
         if self.is_token_expired():
             await self.authenticate()
-
-        # The request needs to be specifically id as a string
-        status_data = {
-            "id": station_id
-        }
-        
-        _LOGGER.debug(
-            "Requesting battery settings for station %s with data: %s",
-            station_id,
-            json.dumps(status_data),
-        )
-        
-        # First, check the status of settings to see if they're available
         try:
-            status_response = await self._session.post(
-                API_BATTERY_SETTINGS_STATUS_URL,
-                headers=self._auth_headers(include_accept=False),
-                json=status_data,
+            response = await self._submit_battery_settings_command(
+                API_BATTERY_SETTINGS_READ_URL,
+                {
+                    "action": BATTERY_SETTINGS_ACTION_ID,
+                    "data": {"sid": int(station_id)},
+                },
+                log_label=f"battery settings read for station {station_id}",
             )
-            resp_text = await status_response.text()
-            _LOGGER.debug("Raw setting status response: %s", resp_text)
-            
-            try:
-                status_data = json.loads(resp_text)
-                
-                # If status is success and we have data with actual battery settings
-                if (status_data.get("status") == "0" and 
-                    status_data.get("message") == "success" and
-                    status_data.get("data") and 
-                    status_data.get("data", {}).get("data") and 
-                    isinstance(status_data["data"]["data"], dict)):
-                    
-                    _LOGGER.debug("Successfully received battery settings")
-                    
-                    mode_data = status_data["data"]["data"].get("data", {})
-                    current_mode = status_data["data"]["data"].get("mode", 1)
-                    current_mode_key = MODE_KEY_MAPPING.get(current_mode)
+            final_response = await self._resolve_battery_settings_command(
+                response,
+                expect_result=True,
+                command_label=f"battery settings read for station {station_id}",
+            )
+        except json.JSONDecodeError as err:
+            _LOGGER.warning("Error decoding battery settings JSON: %s", err)
+            return build_empty_battery_settings(message="Invalid battery settings response")
+        except Exception as err:
+            _LOGGER.warning("Error checking battery settings status: %s", err)
+            return build_empty_battery_settings(message="Unable to read battery settings")
 
-                    result = build_empty_battery_settings(readable=True, writable=True)
-                    result["data"] = {"mode": current_mode}
-                    result["mode_data"] = mode_data
-                    result["available_modes"] = []
-
-                    if current_mode_key and current_mode_key in mode_data:
-                        result["data"]["reserve_soc"] = mode_data[current_mode_key].get(
-                            "reserve_soc"
-                        )
-
-                    for mode_id, k_mode in MODE_KEY_MAPPING.items():
-                        if k_mode in mode_data:
-                            result["available_modes"].append(mode_id)
-                            result["mode_settings"][mode_id] = deepcopy(mode_data[k_mode])
-
-                    _LOGGER.debug("Parsed battery settings: %s", json.dumps(result, indent=2))
-                    return result
-                
-                # Check for specific error messages
-                if status_data.get("status") != "0":
-                    _LOGGER.info(
-                        "Battery settings unavailable for station %s: %s - %s",
-                        station_id,
-                        status_data.get("status"),
-                        status_data.get("message"),
-                    )
-                    return build_empty_battery_settings(
-                        status=str(status_data.get("status")),
-                        message=str(status_data.get("message")),
-                    )
-                
-            except json.JSONDecodeError as e:
-                _LOGGER.warning("Error decoding status response JSON: %s", e)
-            
-        except Exception as e:
-            _LOGGER.warning("Error checking battery settings status: %s", e)
-        
-        return build_empty_battery_settings(message="Unable to read battery settings")
+        return self._parse_battery_settings_response(final_response)
 
     def _default_mode_settings(self, mode: int) -> dict[str, Any]:
         """Return default settings for a battery mode."""
         return deepcopy(DEFAULT_MODE_SETTINGS.get(mode, {}))
+
+    async def _submit_battery_settings_command(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        log_label: str,
+    ) -> dict[str, Any]:
+        """Submit a battery settings command and return the raw response."""
+        async with self._session.post(
+            url,
+            headers=self._auth_headers(),
+            json=payload,
+        ) as response:
+            resp_text = await response.text()
+
+        _LOGGER.debug("%s response: %s", log_label, resp_text)
+        return json.loads(resp_text)
+
+    async def _poll_battery_settings_status(
+        self,
+        command_id: str,
+        *,
+        command_label: str,
+    ) -> dict[str, Any]:
+        """Poll the battery settings status endpoint until completion."""
+        for attempt in range(BATTERY_SETTINGS_MAX_POLLS):
+            response = await self._submit_battery_settings_command(
+                API_BATTERY_SETTINGS_STATUS_URL,
+                {"id": str(command_id)},
+                log_label=f"{command_label} status poll {attempt + 1}",
+            )
+            if response.get("status") != "0" or response.get("message") != "success":
+                return response
+
+            status_data = response.get("data", {})
+            if not isinstance(status_data, dict):
+                return response
+
+            if status_data.get("code") != BATTERY_SETTINGS_STATUS_RUNNING:
+                return response
+
+            await asyncio.sleep(BATTERY_SETTINGS_POLL_INTERVAL)
+
+        return {
+            "status": "timeout",
+            "message": f"Timed out waiting for {command_label}",
+            "data": {"code": BATTERY_SETTINGS_STATUS_RUNNING},
+        }
+
+    async def _resolve_battery_settings_command(
+        self,
+        response: dict[str, Any],
+        *,
+        expect_result: bool,
+        command_label: str,
+    ) -> dict[str, Any]:
+        """Resolve a battery settings command that may return a job id."""
+        if response.get("status") != "0" or response.get("message") != "success":
+            return response
+
+        data = response.get("data")
+        if isinstance(data, (str, int)):
+            return await self._poll_battery_settings_status(
+                str(data),
+                command_label=command_label,
+            )
+
+        if expect_result and isinstance(data, dict) and isinstance(data.get("data"), dict):
+            return response
+
+        return response
+
+    def _parse_battery_settings_response(self, response: dict[str, Any]) -> dict[str, Any]:
+        """Normalize a completed battery settings response."""
+        if response.get("status") != "0" or response.get("message") != "success":
+            return build_empty_battery_settings(
+                status=str(response.get("status")),
+                message=str(response.get("message")),
+            )
+
+        response_data = response.get("data", {})
+        if not isinstance(response_data, dict):
+            return build_empty_battery_settings(message="Missing battery settings data")
+
+        status_code = response_data.get("code")
+        if status_code not in (None, BATTERY_SETTINGS_STATUS_SUCCESS):
+            return build_empty_battery_settings(
+                message=response_data.get("message") or "Battery settings are still pending",
+            )
+
+        settings_payload = response_data.get("data")
+        if not isinstance(settings_payload, dict):
+            return build_empty_battery_settings(message="Missing battery settings payload")
+
+        mode_data = settings_payload.get("data", {})
+        if not isinstance(mode_data, dict):
+            return build_empty_battery_settings(message="Invalid battery settings payload")
+
+        current_mode = settings_payload.get("mode", BATTERY_MODE_SELF_CONSUMPTION)
+        current_mode_key = MODE_KEY_MAPPING.get(current_mode)
+
+        result = build_empty_battery_settings(readable=True, writable=True)
+        result["data"] = {"mode": current_mode}
+        result["mode_data"] = deepcopy(mode_data)
+        result["available_modes"] = []
+
+        if current_mode_key and current_mode_key in mode_data:
+            result["data"]["reserve_soc"] = mode_data[current_mode_key].get("reserve_soc")
+
+        for mode_id, k_mode in MODE_KEY_MAPPING.items():
+            if k_mode in mode_data:
+                result["available_modes"].append(mode_id)
+                result["mode_settings"][mode_id] = deepcopy(mode_data[k_mode])
+
+        _LOGGER.debug("Parsed battery settings: %s", json.dumps(result, indent=2))
+        return result
+
+    def _merge_mode_settings(
+        self,
+        base_settings: dict[str, Any],
+        updates: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Recursively merge user updates into an existing mode payload."""
+        merged = deepcopy(base_settings)
+        for key, value in updates.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = self._merge_mode_settings(merged[key], value)
+            else:
+                merged[key] = deepcopy(value)
+        return merged
 
     async def _write_battery_mode_payload(
         self, station_id: str, mode: int, mode_settings: dict[str, Any]
@@ -952,14 +1037,15 @@ class HoymilesAPI:
         if not self._token or self.is_token_expired():
             await self.authenticate()
 
+        payload_data: dict[str, Any] = {"mode": mode}
+        if mode_settings:
+            payload_data["data"] = mode_settings
+
         data = {
-            "action": 1013,
+            "action": BATTERY_SETTINGS_ACTION_ID,
             "data": {
                 "sid": int(station_id),
-                "data": {
-                    "mode": mode,
-                    "data": mode_settings,
-                },
+                "data": payload_data,
             },
         }
 
@@ -970,22 +1056,34 @@ class HoymilesAPI:
         )
 
         try:
-            async with self._session.post(
+            response = await self._submit_battery_settings_command(
                 API_BATTERY_SETTINGS_WRITE_URL,
-                headers=self._auth_headers(),
-                json=data,
-            ) as response:
-                resp_text = await response.text()
-                _LOGGER.debug("Battery settings write response: %s", resp_text)
-                resp = json.loads(resp_text)
-        except json.JSONDecodeError as e:
-            _LOGGER.error("Error decoding battery settings response: %s", e)
+                data,
+                log_label=f"battery settings write for station {station_id} mode {mode}",
+            )
+            resp = await self._resolve_battery_settings_command(
+                response,
+                expect_result=False,
+                command_label=f"battery settings write for station {station_id} mode {mode}",
+            )
+        except json.JSONDecodeError as err:
+            _LOGGER.error("Error decoding battery settings response: %s", err)
             return False
-        except Exception as e:
-            _LOGGER.error("Error writing battery settings: %s", e)
+        except Exception as err:
+            _LOGGER.error("Error writing battery settings: %s", err)
             raise
 
         if resp.get("status") == "0" and resp.get("message") == "success":
+            status_data = resp.get("data", {})
+            if isinstance(status_data, dict) and status_data.get("code") not in (
+                None,
+                BATTERY_SETTINGS_STATUS_SUCCESS,
+            ):
+                _LOGGER.error(
+                    "Battery settings write did not complete successfully: %s",
+                    json.dumps(resp),
+                )
+                return False
             _LOGGER.info(
                 "Successfully updated battery settings for mode %s on station %s",
                 mode,
@@ -1014,16 +1112,47 @@ class HoymilesAPI:
 
         mode_settings = get_mode_settings(current_settings, mode) or self._default_mode_settings(mode)
 
-        if mode == 2:
+        if mode == BATTERY_MODE_ECONOMY:
             mode_settings.setdefault("money_code", "$")
             mode_settings.setdefault("date", [])
 
         return current_settings, mode_settings
 
+    async def set_battery_mode_settings(
+        self,
+        station_id: str,
+        mode: int,
+        settings: dict[str, Any],
+        *,
+        merge: bool = True,
+    ) -> bool:
+        """Update the payload for a battery mode and activate that mode."""
+        if mode not in BATTERY_MODE_IDS:
+            _LOGGER.error("Invalid battery mode: %s", mode)
+            return False
+        if not isinstance(settings, dict):
+            _LOGGER.error("Battery mode settings must be a dictionary")
+            return False
+
+        _, current_mode_settings = await self._get_writable_mode_settings(station_id, mode)
+        if not current_mode_settings and not settings and mode not in DEFAULT_MODE_SETTINGS:
+            return False
+
+        mode_settings = (
+            self._merge_mode_settings(current_mode_settings, settings)
+            if merge
+            else deepcopy(settings)
+        )
+
+        if mode == BATTERY_MODE_ECONOMY:
+            mode_settings.setdefault("money_code", "$")
+            mode_settings.setdefault("date", [])
+
+        return await self._write_battery_mode_payload(station_id, mode, mode_settings)
+
     async def set_battery_mode(self, station_id: str, mode: int) -> bool:
         """Set battery mode for a station."""
-        valid_modes = [1, 2, 3, 4, 7, 8]  # Self-Consumption, Economy, Backup, Off-Grid, Peak Shaving, Time of Use
-        if mode not in valid_modes:
+        if mode not in BATTERY_MODE_IDS:
             _LOGGER.error("Invalid battery mode: %s", mode)
             return False
 
@@ -1055,17 +1184,11 @@ class HoymilesAPI:
         current_mode = current_settings.get("data", {}).get(
             "mode", BATTERY_MODE_SELF_CONSUMPTION
         )
-        mode_settings = get_mode_settings(current_settings, current_mode) or self._default_mode_settings(
-            current_mode
+        return await self.set_battery_mode_settings(
+            station_id,
+            current_mode,
+            {"reserve_soc": reserve_soc},
         )
-        mode_settings["reserve_soc"] = reserve_soc
-
-        success = await self._write_battery_mode_payload(
-            station_id, current_mode, mode_settings
-        )
-        if success:
-            await asyncio.sleep(1)
-        return success
 
     async def set_peak_shaving_settings(
         self,
@@ -1076,15 +1199,16 @@ class HoymilesAPI:
         meter_power: int | None = None,
     ) -> bool:
         """Set Peak Shaving mode settings for a station."""
-        _, mode_settings = await self._get_writable_mode_settings(station_id, 7)
-        if not mode_settings:
-            return False
-
+        updates: dict[str, Any] = {}
         if reserve_soc is not None:
-            mode_settings["reserve_soc"] = reserve_soc
+            updates["reserve_soc"] = reserve_soc
         if max_soc is not None:
-            mode_settings["max_soc"] = max_soc
+            updates["max_soc"] = max_soc
         if meter_power is not None:
-            mode_settings["meter_power"] = meter_power
+            updates["meter_power"] = meter_power
 
-        return await self._write_battery_mode_payload(station_id, 7, mode_settings)
+        return await self.set_battery_mode_settings(
+            station_id,
+            7,
+            updates,
+        )

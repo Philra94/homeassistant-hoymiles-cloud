@@ -132,7 +132,13 @@ def test_get_battery_settings_success_exposes_available_modes() -> None:
                 {
                     "status": "0",
                     "message": "success",
+                    "data": "job-123",
+                },
+                {
+                    "status": "0",
+                    "message": "success",
                     "data": {
+                        "code": 0,
                         "data": {
                             "mode": 7,
                             "data": {
@@ -161,6 +167,145 @@ def test_get_battery_settings_success_exposes_available_modes() -> None:
     assert battery_settings["available_modes"] == [1, 7]
     assert battery_settings["data"]["mode"] == 7
     assert battery_settings["data"]["reserve_soc"] == 30
+    assert api._session.requests[0]["kwargs"]["json"] == {"action": 1013, "data": {"sid": 123}}
+    assert api._session.requests[1]["kwargs"]["json"] == {"id": "job-123"}
+
+
+def test_set_battery_mode_polls_write_job_until_complete() -> None:
+    """Battery mode writes should follow the async write -> status polling flow."""
+    session = FakeSession(
+        [
+            {
+                "status": "0",
+                "message": "success",
+                "data": "read-job",
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": {
+                    "code": 0,
+                    "data": {
+                        "mode": 1,
+                        "data": {
+                            "k_1": {"reserve_soc": 10},
+                        },
+                    },
+                },
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": "write-job",
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": {"code": 2, "data": []},
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": {"code": 0, "data": []},
+            },
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    success = asyncio.run(api.set_battery_mode("123", 1))
+
+    assert success is True
+    assert session.requests[2]["kwargs"]["json"] == {
+        "action": 1013,
+        "data": {"sid": 123, "data": {"mode": 1, "data": {"reserve_soc": 10}}},
+    }
+    assert session.requests[3]["kwargs"]["json"] == {"id": "write-job"}
+    assert session.requests[4]["kwargs"]["json"] == {"id": "write-job"}
+
+
+def test_set_battery_mode_settings_merges_into_existing_schedule_payload() -> None:
+    """Advanced mode updates should preserve schedule data by default."""
+    session = FakeSession(
+        [
+            {
+                "status": "0",
+                "message": "success",
+                "data": "read-job",
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": {
+                    "code": 0,
+                    "data": {
+                        "mode": 8,
+                        "data": {
+                            "k_8": {
+                                "reserve_soc": 10,
+                                "time": [
+                                    {
+                                        "cs_time": "03:00",
+                                        "ce_time": "05:00",
+                                        "c_power": 100,
+                                        "dcs_time": "05:00",
+                                        "dce_time": "03:00",
+                                        "dc_power": 100,
+                                        "charge_soc": 90,
+                                        "dis_charge_soc": 10,
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                },
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": "write-job",
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": {"code": 0, "data": []},
+            },
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    success = asyncio.run(
+        api.set_battery_mode_settings("123", 8, {"reserve_soc": 15})
+    )
+
+    assert success is True
+    assert session.requests[2]["kwargs"]["json"] == {
+        "action": 1013,
+        "data": {
+            "sid": 123,
+            "data": {
+                "mode": 8,
+                "data": {
+                    "reserve_soc": 15,
+                    "time": [
+                        {
+                            "cs_time": "03:00",
+                            "ce_time": "05:00",
+                            "c_power": 100,
+                            "dcs_time": "05:00",
+                            "dce_time": "03:00",
+                            "dc_power": 100,
+                            "charge_soc": 90,
+                            "dis_charge_soc": 10,
+                        }
+                    ],
+                },
+            },
+        },
+    }
 
 
 def test_authenticate_preserves_s_miles_home_failure_details() -> None:

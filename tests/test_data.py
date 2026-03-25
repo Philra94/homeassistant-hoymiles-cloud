@@ -5,6 +5,7 @@ data_module = load_integration_module("data")
 build_empty_battery_settings = data_module.build_empty_battery_settings
 build_station_capabilities = data_module.build_station_capabilities
 discover_pv_channels = data_module.discover_pv_channels
+get_schedule_modes = data_module.get_schedule_modes
 
 
 def test_discover_pv_channels_supports_more_than_two_inputs() -> None:
@@ -40,3 +41,17 @@ def test_build_station_capabilities_keeps_battery_telemetry_separate() -> None:
     assert capabilities["battery_settings_readable"] is False
     assert capabilities["battery_settings_writable"] is False
     assert capabilities["pv_channels"] == [1]
+
+
+def test_get_schedule_modes_only_returns_known_schedule_modes() -> None:
+    """Only Economy and Time of Use should be flagged as schedule modes."""
+    battery_settings = build_empty_battery_settings(readable=True, writable=True)
+    battery_settings["available_modes"] = [1, 2, 7, 8]
+    battery_settings["mode_data"] = {
+        "k_1": {"reserve_soc": 10},
+        "k_2": {"reserve_soc": 10, "date": []},
+        "k_7": {"reserve_soc": 35, "max_soc": 70},
+        "k_8": {"reserve_soc": 10, "time": []},
+    }
+
+    assert get_schedule_modes(battery_settings) == [2, 8]

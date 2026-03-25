@@ -32,6 +32,8 @@ from .const import BATTERY_MODES, DOMAIN
 from .data import (
     battery_settings_readable,
     discover_pv_channels,
+    get_schedule_modes,
+    get_supported_modes,
     get_pv_indicator_value,
 )
 
@@ -491,6 +493,16 @@ class HoymilesBatteryModeSensor(HoymilesBaseSensor):
         if mode is None:
             return None
         return BATTERY_MODES.get(mode, f"Unknown ({mode})")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose the supported battery modes for diagnostics."""
+        battery_settings = self._get_station_data().get("battery_settings", {})
+        return {
+            "mode_id": battery_settings.get("data", {}).get("mode"),
+            "supported_modes": get_supported_modes(battery_settings),
+            "schedule_modes": get_schedule_modes(battery_settings),
+        }
 
     @property
     def available(self) -> bool:
