@@ -18,6 +18,7 @@ This custom integration for Home Assistant allows you to monitor and control you
   - Set battery operation mode when the account exposes writable battery settings
   - Configure battery reserve state of charge for the modes returned by the account
   - Peak Shaving Mode specific settings (`max_soc`, `meter_power`) when supported
+  - Home Assistant-native draft editors for Economy and Time of Use schedules using built-in selects, text fields, numbers, buttons, and summary sensors
   - Advanced battery mode payload updates through Home Assistant services for Economy and Time of Use schedules
 
 ## Development Status
@@ -70,17 +71,48 @@ After configuration, the integration will create:
 
 - A device for each Hoymiles station with sensors for power, energy, and battery levels
 - Controls for battery mode and reserve capacity settings only when the account exposes writable battery settings
+- A schedule editor surface for Economy (`mode: 2`) and Time of Use (`mode: 8`) when those modes are present in the live Hoymiles payload
 
 The integration creates PV input sensors from the indicator keys returned by the API. If a system has more than two PV inputs and Hoymiles exposes them in the indicators payload, matching Home Assistant sensors will be created automatically.
 
 The sensors will update every minute by default, but this can be changed in the integration options.
 
+### Schedule editor
+
+The integration now exposes a Home Assistant-native draft editor for the two schedule-bearing battery modes:
+
+- `Schedule Editor Mode` chooses whether you are editing Economy or Time of Use
+- Summary and count sensors show the live/draft schedule at a glance
+- Validation and dirty-state sensors show whether the draft is safe to apply
+- Built-in buttons load, apply, discard, add, and remove schedule rows
+
+Time of Use draft entities expose:
+
+- active period selector
+- charge/discharge start and end times
+- charge/discharge power
+- charge and discharge SOC targets
+
+Economy draft entities expose:
+
+- active date window selector
+- active weekday-group selector
+- active duration-type selector
+- start and end date fields (`MM-DD`)
+- start and end time fields for the selected duration
+- `in` and `out` numeric fields for the selected duration
+
 ### Advanced battery services
 
-For structured battery settings that are awkward to model as individual entities, the integration also registers two services:
+For structured battery settings and automation-friendly editor flows, the integration registers these services:
 
 - `hoymiles_cloud.set_battery_mode`
 - `hoymiles_cloud.set_battery_mode_settings`
+- `hoymiles_cloud.load_schedule_draft`
+- `hoymiles_cloud.apply_schedule_draft`
+- `hoymiles_cloud.reset_schedule_draft`
+- `hoymiles_cloud.add_schedule_entry`
+- `hoymiles_cloud.remove_schedule_entry`
 
 `set_battery_mode_settings` accepts a raw settings dictionary and merges it into the live Hoymiles mode payload by default. This is the recommended path for advanced Economy (`mode: 2`) and Time of Use (`mode: 8`) schedule updates because the backend expects the full mode payload to be preserved.
 
@@ -89,7 +121,8 @@ For structured battery settings that are awkward to model as individual entities
 - The integration uses the modern Hoymiles v3 authentication flow with the observed browser-compatible hashing fallback.
 - Some accounts appear to require a different Hoymiles client/account family. If Hoymiles responds with messages like `Can only login to the S-Miles Home.` or `Your app version is low. Please update to the latest version.`, the integration now exposes those outcomes more clearly in the config flow and logs while still keeping the user-facing setup flow simple.
 - Some accounts expose live battery telemetry but deny access to battery settings. In that case the integration keeps the telemetry sensors and hides the unsupported controls.
-- Economy and Time-of-Use schedules are exposed through services instead of many per-slot entities because Hoymiles expects structured payloads and full schedule arrays.
+- Economy and Time-of-Use schedules now have draft editor entities in Home Assistant, but the integration still writes the full structured Hoymiles payload on apply.
+- Validation is intentionally conservative for schedule editing: time/date formats and basic numeric ranges are checked before writes, while ambiguous Hoymiles-specific semantics are kept internal.
 - API endpoints and payload structures are based on observed Hoymiles Cloud behavior and may still vary by region, account role, and hardware family.
 
 ## Contributing

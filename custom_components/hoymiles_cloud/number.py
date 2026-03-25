@@ -11,9 +11,25 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
-from .const import BATTERY_MODE_PEAK_SHAVING, BATTERY_MODES, DOMAIN
+from .const import (
+    BATTERY_MODE_ECONOMY,
+    BATTERY_MODE_PEAK_SHAVING,
+    BATTERY_MODE_TIME_OF_USE,
+    BATTERY_MODES,
+    DOMAIN,
+)
 from .data import battery_settings_writable, get_mode_settings, get_supported_modes
 from .hoymiles_api import HoymilesAPI
+from .schedule_editor import (
+    build_device_info,
+    get_mode_draft,
+    get_selected_economy_duration,
+    get_selected_economy_week_group,
+    get_selected_economy_window,
+    get_selected_tou_period,
+    get_station_data,
+    mode_has_editor,
+)
 
 
 async def async_setup_entry(
@@ -27,6 +43,7 @@ async def async_setup_entry(
     stations = runtime_data["stations"]
     api = runtime_data["api"]
     update_soc = runtime_data["update_soc"]
+    set_schedule_editor_field = runtime_data["set_schedule_editor_field"]
 
     entities = []
     for station_id, station_name in stations.items():
@@ -71,6 +88,102 @@ async def async_setup_entry(
                     )
                 )
 
+        if station_data.get("schedule_editor", {}).get("available_modes"):
+            entities.extend(
+                [
+                    HoymilesScheduleNumberEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_TIME_OF_USE,
+                        "time_of_use_charge_power",
+                        "Time of Use Charge Power",
+                        _tou_period_path,
+                        "c_power",
+                        0,
+                        20000,
+                        100,
+                        "W",
+                    ),
+                    HoymilesScheduleNumberEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_TIME_OF_USE,
+                        "time_of_use_discharge_power",
+                        "Time of Use Discharge Power",
+                        _tou_period_path,
+                        "dc_power",
+                        0,
+                        20000,
+                        100,
+                        "W",
+                    ),
+                    HoymilesScheduleNumberEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_TIME_OF_USE,
+                        "time_of_use_charge_soc",
+                        "Time of Use Charge SOC",
+                        _tou_period_path,
+                        "charge_soc",
+                        0,
+                        100,
+                        1,
+                        PERCENTAGE,
+                    ),
+                    HoymilesScheduleNumberEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_TIME_OF_USE,
+                        "time_of_use_discharge_soc",
+                        "Time of Use Discharge SOC",
+                        _tou_period_path,
+                        "dis_charge_soc",
+                        0,
+                        100,
+                        1,
+                        PERCENTAGE,
+                    ),
+                    HoymilesScheduleNumberEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_ECONOMY,
+                        "economy_duration_in",
+                        "Economy Duration In",
+                        _economy_duration_path,
+                        "in",
+                        0,
+                        100,
+                        0.1,
+                        None,
+                    ),
+                    HoymilesScheduleNumberEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_ECONOMY,
+                        "economy_duration_out",
+                        "Economy Duration Out",
+                        _economy_duration_path,
+                        "out",
+                        0,
+                        100,
+                        0.1,
+                        None,
+                    ),
+                ]
+            )
+
     async_add_entities(entities)
 
 
@@ -88,17 +201,12 @@ class HoymilesBatteryNumberEntity(CoordinatorEntity, NumberEntity):
         super().__init__(coordinator)
         self._api = api
         self._station_id = station_id
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, station_id)},
-            "name": station_name,
-            "manufacturer": "Hoymiles",
-            "model": "Solar Inverter System",
-        }
+        self._attr_device_info = build_device_info(station_id, station_name)
         self._attr_entity_category = EntityCategory.CONFIG
 
     def _get_station_data(self) -> dict:
         """Return the coordinator payload for this station."""
-        return self.coordinator.data.get(self._station_id, {}) if self.coordinator.data else {}
+        return get_station_data(self.coordinator, self._station_id)
 
     def _get_battery_settings(self) -> dict:
         """Return the current battery settings payload."""
@@ -254,3 +362,81 @@ class HoymilesPeakShavingMeterPower(HoymilesBatteryNumberEntity):
 
         await self.coordinator.async_request_refresh()
         self.async_write_ha_state()
+
+
+def _tou_period_path(draft: dict[str, Any]) -> tuple[Any, ...]:
+    index, _ = get_selected_tou_period(draft)
+    return ("periods", index)
+
+
+def _economy_duration_path(draft: dict[str, Any]) -> tuple[Any, ...]:
+    window_index, _ = get_selected_economy_window(draft)
+    week_index, _ = get_selected_economy_week_group(draft)
+    duration_index, _ = get_selected_economy_duration(draft)
+    return ("date_windows", window_index, "week_groups", week_index, "durations", duration_index)
+
+
+class HoymilesScheduleNumberEntity(CoordinatorEntity, NumberEntity):
+    """Number entity backed by the normalized schedule editor draft."""
+
+    def __init__(
+        self,
+        coordinator: DataUpdateCoordinator,
+        station_id: str,
+        station_name: str,
+        set_schedule_editor_field,
+        mode: int,
+        entity_key: str,
+        label: str,
+        base_path_fn,
+        field_name: str,
+        min_value: float,
+        max_value: float,
+        step: float,
+        unit: str | None,
+    ) -> None:
+        """Initialize the schedule editor number entity."""
+        super().__init__(coordinator)
+        self._station_id = station_id
+        self._set_schedule_editor_field = set_schedule_editor_field
+        self._mode = mode
+        self._base_path_fn = base_path_fn
+        self._field_name = field_name
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_{entity_key}"
+        self._attr_name = f"{station_name} {label}"
+        self._attr_device_info = build_device_info(station_id, station_name)
+        self._attr_entity_category = EntityCategory.CONFIG
+        self._attr_native_min_value = min_value
+        self._attr_native_max_value = max_value
+        self._attr_native_step = step
+        self._attr_mode = NumberMode.BOX
+        if unit:
+            self._attr_native_unit_of_measurement = unit
+
+    def _get_station_data(self) -> dict[str, Any]:
+        """Return the current station payload."""
+        return get_station_data(self.coordinator, self._station_id)
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current draft number value."""
+        draft = get_mode_draft(self._get_station_data(), self._mode)
+        current: Any = draft
+        for key in (*self._base_path_fn(draft), self._field_name):
+            current = current[key]
+        return float(current)
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Persist an updated schedule draft number."""
+        draft = get_mode_draft(self._get_station_data(), self._mode)
+        path = (*self._base_path_fn(draft), self._field_name)
+        target_value: float | int = int(value) if self._attr_native_step >= 1 else float(value)
+        await self._set_schedule_editor_field(self._station_id, self._mode, path, target_value)
+
+    @property
+    def available(self) -> bool:
+        """Return whether this control is active for the selected mode."""
+        return self.coordinator.last_update_success and mode_has_editor(
+            self._get_station_data(),
+            self._mode,
+        )

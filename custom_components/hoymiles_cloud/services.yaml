@@ -70,3 +70,138 @@ set_battery_mode_settings:
       required: false
       selector:
         text:
+
+load_schedule_draft:
+  name: Load schedule draft
+  description: Load the current live Hoymiles schedule into the Home Assistant schedule editor draft.
+  fields:
+    station_id:
+      name: Station ID
+      description: Hoymiles station identifier.
+      required: true
+      selector:
+        text:
+    mode:
+      name: Mode
+      description: Optional schedule mode id to load. Defaults to the selected editor mode.
+      required: false
+      selector:
+        number:
+          min: 2
+          max: 8
+          step: 1
+          mode: box
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Home Assistant config entry id when the same station id exists in more than one Hoymiles account.
+      required: false
+      selector:
+        text:
+
+apply_schedule_draft:
+  name: Apply schedule draft
+  description: Validate the selected draft and write it back to Hoymiles.
+  fields:
+    station_id:
+      name: Station ID
+      description: Hoymiles station identifier.
+      required: true
+      selector:
+        text:
+    mode:
+      name: Mode
+      description: Optional schedule mode id to apply. Defaults to the selected editor mode.
+      required: false
+      selector:
+        number:
+          min: 2
+          max: 8
+          step: 1
+          mode: box
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Home Assistant config entry id when the same station id exists in more than one Hoymiles account.
+      required: false
+      selector:
+        text:
+
+reset_schedule_draft:
+  name: Reset schedule draft
+  description: Discard unsaved changes and return the selected schedule draft to the live Hoymiles payload.
+  fields:
+    station_id:
+      name: Station ID
+      description: Hoymiles station identifier.
+      required: true
+      selector:
+        text:
+    mode:
+      name: Mode
+      description: Optional schedule mode id to reset. Defaults to the selected editor mode.
+      required: false
+      selector:
+        number:
+          min: 2
+          max: 8
+          step: 1
+          mode: box
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Home Assistant config entry id when the same station id exists in more than one Hoymiles account.
+      required: false
+      selector:
+        text:
+
+add_schedule_entry:
+  name: Add schedule entry
+  description: Add a new period or date window to the selected schedule draft.
+  fields:
+    station_id:
+      name: Station ID
+      description: Hoymiles station identifier.
+      required: true
+      selector:
+        text:
+    mode:
+      name: Mode
+      description: Optional schedule mode id to edit. Defaults to the selected editor mode.
+      required: false
+      selector:
+        number:
+          min: 2
+          max: 8
+          step: 1
+          mode: box
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Home Assistant config entry id when the same station id exists in more than one Hoymiles account.
+      required: false
+      selector:
+        text:
+
+remove_schedule_entry:
+  name: Remove schedule entry
+  description: Remove the selected period or date window from the current schedule draft.
+  fields:
+    station_id:
+      name: Station ID
+      description: Hoymiles station identifier.
+      required: true
+      selector:
+        text:
+    mode:
+      name: Mode
+      description: Optional schedule mode id to edit. Defaults to the selected editor mode.
+      required: false
+      selector:
+        number:
+          min: 2
+          max: 8
+          step: 1
+          mode: box
+    config_entry_id:
+      name: Config entry ID
+      description: Optional Home Assistant config entry id when the same station id exists in more than one Hoymiles account.
+      required: false
+      selector:
+        text:
