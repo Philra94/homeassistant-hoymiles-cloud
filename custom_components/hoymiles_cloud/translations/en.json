@@ -6,9 +6,23 @@
         "description": "Enter your Hoymiles Cloud credentials",
         "data": {
           "username": "Username (Email)",
-          "password": "Password"
+          "password": "Password",
+          "auth_mode": "Authentication mode",
+          "app_version": "Override app version (optional)"
         }
+      },
+      "confirm": {
+        "title": "Confirm Stations",
+        "description": "Authentication succeeded. The following stations were discovered: {stations}"
       }
+    },
+    "progress": {
+      "confirm": {
+        "description": "Verifying credentials and discovering stations"
+      }
+    },
+    "abort": {
+      "already_configured": "Account already configured"
     },
     "error": {
       "cannot_connect": "Failed to connect to Hoymiles Cloud",
@@ -19,8 +33,16 @@
       "no_accessible_stations": "Authentication succeeded, but no accessible stations were returned for this account",
       "unknown": "Unexpected error"
     },
-    "abort": {
-      "already_configured": "Account already configured"
+    "selector": {
+      "auth_mode": {
+        "options": {
+          "auto": "Auto-detect",
+          "web_v3": "S-Miles Cloud Web",
+          "installer_v3": "S-Miles Installer",
+          "home_v3": "S-Miles Home",
+          "legacy_v0": "Legacy v0"
+        }
+      }
     }
   },
   "options": {
@@ -29,7 +51,10 @@
         "title": "Hoymiles Cloud Options",
         "description": "Configure the integration options",
         "data": {
-          "scan_interval": "Data update interval (seconds)"
+          "scan_interval": "Data update interval (seconds)",
+          "fetch_grid_indicators": "Fetch 3-phase grid indicators",
+          "fetch_energy_flow": "Fetch daily energy-flow statistics",
+          "fetch_eps_profit": "Fetch EPS profit and spend statistics"
         }
       }
     }

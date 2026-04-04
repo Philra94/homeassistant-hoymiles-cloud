@@ -8,9 +8,12 @@ from typing import Any
 
 from .const import (
     BATTERY_MODE_ECONOMY,
+    BATTERY_MODE_BACKUP_MAX_POWER,
     BATTERY_MODE_IDS,
+    BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER,
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_SCHEDULE_MODE_IDS,
+    METER_LOCATION_NAMES,
 )
 
 
@@ -19,6 +22,8 @@ MODE_KEY_MAPPING = {
     2: "k_2",
     3: "k_3",
     4: "k_4",
+    5: "k_5",
+    6: "k_6",
     7: "k_7",
     8: "k_8",
 }
@@ -500,6 +505,23 @@ def build_empty_battery_settings(
     }
 
 
+def build_empty_relay_settings(
+    *,
+    readable: bool = False,
+    writable: bool = False,
+    status: str | None = None,
+    message: str | None = None,
+) -> dict[str, Any]:
+    """Build a consistent relay-settings payload."""
+    return {
+        "readable": readable,
+        "writable": writable,
+        "data": {},
+        "error_status": status,
+        "error_message": message,
+    }
+
+
 def battery_settings_readable(battery_settings: dict[str, Any] | None) -> bool:
     """Return whether the battery settings endpoint is readable."""
     return bool(battery_settings and battery_settings.get("readable"))
@@ -508,6 +530,40 @@ def battery_settings_readable(battery_settings: dict[str, Any] | None) -> bool:
 def battery_settings_writable(battery_settings: dict[str, Any] | None) -> bool:
     """Return whether battery settings can be written."""
     return bool(battery_settings and battery_settings.get("writable"))
+
+
+def relay_settings_readable(relay_settings: dict[str, Any] | None) -> bool:
+    """Return whether the relay settings endpoint is readable."""
+    return bool(relay_settings and relay_settings.get("readable"))
+
+
+def relay_settings_writable(relay_settings: dict[str, Any] | None) -> bool:
+    """Return whether relay settings can be written."""
+    return bool(relay_settings and relay_settings.get("writable"))
+
+
+def relay_settings_enabled(relay_settings: dict[str, Any] | None) -> bool:
+    """Return whether relay automation appears enabled."""
+    if not relay_settings_readable(relay_settings):
+        return False
+
+    payload = (relay_settings or {}).get("data", {})
+    if not isinstance(payload, dict):
+        return False
+
+    if isinstance(payload.get("mode"), int) and payload.get("mode") != 0:
+        return True
+
+    nested = payload.get("data", {})
+    if not isinstance(nested, dict):
+        return False
+
+    for key in ("k_2", "k_3"):
+        mode = nested.get(key, {}).get("mode")
+        if isinstance(mode, int) and mode != 0:
+            return True
+
+    return False
 
 
 def get_backend_modes(battery_settings: dict[str, Any] | None) -> list[int]:
@@ -536,6 +592,25 @@ def get_supported_modes(battery_settings: dict[str, Any] | None) -> list[int]:
         return [mode for mode in available_modes if isinstance(mode, int) and mode in BATTERY_MODE_IDS]
 
     return [mode for mode in get_backend_modes(battery_settings) if mode in BATTERY_MODE_IDS]
+
+
+def get_allowed_battery_modes(
+    battery_settings: dict[str, Any] | None,
+    setting_rules: dict[str, Any] | None = None,
+) -> list[int]:
+    """Return supported modes after applying station-level restrictions."""
+    supported_modes = get_supported_modes(battery_settings)
+    ctl_mode_set = (setting_rules or {}).get("ctl_mode_set")
+    if not isinstance(ctl_mode_set, list) or not ctl_mode_set:
+        return supported_modes
+
+    restricted_modes = {
+        int(mode)
+        for mode in ctl_mode_set
+        if isinstance(mode, (int, float, str)) and str(mode).strip().isdigit()
+    }
+    allowed = [mode for mode in supported_modes if mode in restricted_modes]
+    return allowed or supported_modes
 
 
 def get_mode_settings(
@@ -574,16 +649,30 @@ def mode_fields(battery_settings: dict[str, Any] | None, mode: int) -> list[str]
     return sorted(get_mode_settings(battery_settings, mode).keys())
 
 
+def get_indicator_value(
+    indicators: dict[str, Any] | None,
+    key: str,
+) -> Any:
+    """Return an indicator value by key."""
+    items = indicators.get("list", []) if indicators else []
+    for item in items:
+        if item.get("key") == key:
+            return item.get("val")
+    return None
+
+
+def get_indicator_map(indicators: dict[str, Any] | None) -> dict[str, Any]:
+    """Return all indicators as a key/value mapping."""
+    items = indicators.get("list", []) if indicators else []
+    return {item.get("key"): item.get("val") for item in items if isinstance(item, dict)}
+
+
 def get_pv_indicator_value(
     pv_indicators: dict[str, Any] | None,
     key: str,
 ) -> Any:
     """Return a PV indicator value by key."""
-    items = pv_indicators.get("list", []) if pv_indicators else []
-    for item in items:
-        if item.get("key") == key:
-            return item.get("val")
-    return None
+    return get_indicator_value(pv_indicators, key)
 
 
 def discover_pv_channels(pv_indicators: dict[str, Any] | None) -> list[int]:
@@ -596,6 +685,13 @@ def discover_pv_channels(pv_indicators: dict[str, Any] | None) -> list[int]:
         if suffix in {"v", "i", "p"} and prefix.isdigit():
             channels.add(int(prefix))
     return sorted(channels)
+
+
+def get_energy_flow_value(energy_flow: dict[str, Any] | None, key: str) -> float | int | None:
+    """Return one energy-flow metric if it exists."""
+    if not energy_flow:
+        return None
+    return energy_flow.get(key)
 
 
 def has_battery_telemetry(real_time_data: dict[str, Any] | None) -> bool:
@@ -613,20 +709,61 @@ def build_station_capabilities(
     pv_indicators: dict[str, Any] | None,
     battery_settings: dict[str, Any] | None,
     microinverters_data: dict[str, Any] | None,
+    grid_indicators: dict[str, Any] | None = None,
+    load_indicators: dict[str, Any] | None = None,
+    energy_flow: dict[str, Any] | None = None,
+    relay_settings: dict[str, Any] | None = None,
+    setting_rules: dict[str, Any] | None = None,
+    devices: dict[str, Any] | None = None,
+    eps_settings: dict[str, Any] | None = None,
+    eps_profit: dict[str, Any] | None = None,
+    ai_status: dict[str, Any] | None = None,
+    firmware: dict[str, Any] | None = None,
+    station_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Summarize station capabilities from the current API payloads."""
     pv_channels = discover_pv_channels(pv_indicators)
     battery_settings = battery_settings or {}
+    setting_rules = setting_rules or {}
+    devices = devices or {}
+    allowed_modes = get_allowed_battery_modes(battery_settings, setting_rules)
+    restricted_mode_set = setting_rules.get("ctl_mode_set")
+    meter_locations = [
+        METER_LOCATION_NAMES.get(device.get("location"), str(device.get("location")))
+        for device in devices.get("meters", [])
+        if isinstance(device, dict)
+    ]
 
     return {
         "battery_telemetry": has_battery_telemetry(real_time_data),
         "battery_settings_readable": battery_settings_readable(battery_settings),
         "battery_settings_writable": battery_settings_writable(battery_settings),
+        "relay_settings_readable": relay_settings_readable(relay_settings),
+        "relay_settings_writable": relay_settings_writable(relay_settings),
+        "relay_enabled": relay_settings_enabled(relay_settings),
         "pv_indicators_available": bool((pv_indicators or {}).get("list")),
+        "grid_indicators_available": bool((grid_indicators or {}).get("list")),
+        "load_indicators_available": bool((load_indicators or {}).get("list")),
+        "energy_flow_available": bool(energy_flow),
+        "eps_available": bool(eps_settings),
+        "eps_profit_available": bool(eps_profit),
+        "ai_available": bool(ai_status),
+        "firmware_available": bool(firmware),
         "pv_channels": pv_channels,
         "microinverter_details_available": bool(microinverters_data),
         "microinverter_detail_count": len(microinverters_data or {}),
+        "has_dtu": bool(devices.get("dtus")),
+        "has_inverter": bool(devices.get("inverters")),
+        "has_battery": bool(devices.get("batteries")),
+        "has_meter": bool(devices.get("meters")),
+        "meter_locations": meter_locations,
+        "setting_rules_available": bool(setting_rules),
+        "station_classify": (station_info or {}).get("classify"),
         "supported_battery_modes": get_supported_modes(battery_settings),
+        "allowed_battery_modes": allowed_modes,
         "backend_battery_modes": get_backend_modes(battery_settings),
-        "battery_schedule_modes": get_schedule_modes(battery_settings),
+        "battery_schedule_modes": [mode for mode in allowed_modes if mode_supports_schedule(mode)],
+        "restricted_mode_set": restricted_mode_set if isinstance(restricted_mode_set, list) else [],
+        "supports_mode_5": BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER in get_backend_modes(battery_settings),
+        "supports_mode_6": BATTERY_MODE_BACKUP_MAX_POWER in get_backend_modes(battery_settings),
     }

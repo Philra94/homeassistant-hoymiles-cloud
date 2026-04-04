@@ -7,18 +7,13 @@ from .const import (
     BATTERY_MODE_ECONOMY,
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_MODES,
-    DOMAIN,
 )
+from .device import build_station_device_info
 
 
 def build_device_info(station_id: str, station_name: str) -> dict[str, Any]:
     """Return common device metadata for station-scoped entities."""
-    return {
-        "identifiers": {(DOMAIN, station_id)},
-        "name": station_name,
-        "manufacturer": "Hoymiles",
-        "model": "Solar Inverter System",
-    }
+    return build_station_device_info(station_id, station_name)
 
 
 def get_station_data(coordinator, station_id: str) -> dict[str, Any]:
