@@ -171,8 +171,8 @@ def test_get_battery_settings_success_exposes_available_modes() -> None:
     assert api._session.requests[1]["kwargs"]["json"] == {"id": "job-123"}
 
 
-def test_set_battery_mode_polls_write_job_until_complete() -> None:
-    """Battery mode writes should follow the async write -> status polling flow."""
+def test_set_battery_mode_uses_direct_write_payload() -> None:
+    """Battery mode writes should use the direct station battery-config endpoint."""
     session = FakeSession(
         [
             {
@@ -196,17 +196,7 @@ def test_set_battery_mode_polls_write_job_until_complete() -> None:
             {
                 "status": "0",
                 "message": "success",
-                "data": "write-job",
-            },
-            {
-                "status": "0",
-                "message": "success",
-                "data": {"code": 2, "data": []},
-            },
-            {
-                "status": "0",
-                "message": "success",
-                "data": {"code": 0, "data": []},
+                "data": True,
             },
         ]
     )
@@ -218,11 +208,10 @@ def test_set_battery_mode_polls_write_job_until_complete() -> None:
 
     assert success is True
     assert session.requests[2]["kwargs"]["json"] == {
-        "action": 1013,
-        "data": {"sid": 123, "data": {"mode": 1, "data": {"reserve_soc": 10}}},
+        "sid": 123,
+        "mode": 1,
+        "data": {"reserve_soc": 10},
     }
-    assert session.requests[3]["kwargs"]["json"] == {"id": "write-job"}
-    assert session.requests[4]["kwargs"]["json"] == {"id": "write-job"}
 
 
 def test_set_battery_mode_settings_merges_into_existing_schedule_payload() -> None:
@@ -264,12 +253,7 @@ def test_set_battery_mode_settings_merges_into_existing_schedule_payload() -> No
             {
                 "status": "0",
                 "message": "success",
-                "data": "write-job",
-            },
-            {
-                "status": "0",
-                "message": "success",
-                "data": {"code": 0, "data": []},
+                "data": True,
             },
         ]
     )
@@ -283,27 +267,22 @@ def test_set_battery_mode_settings_merges_into_existing_schedule_payload() -> No
 
     assert success is True
     assert session.requests[2]["kwargs"]["json"] == {
-        "action": 1013,
+        "sid": 123,
+        "mode": 8,
         "data": {
-            "sid": 123,
-            "data": {
-                "mode": 8,
-                "data": {
-                    "reserve_soc": 15,
-                    "time": [
-                        {
-                            "cs_time": "03:00",
-                            "ce_time": "05:00",
-                            "c_power": 100,
-                            "dcs_time": "05:00",
-                            "dce_time": "03:00",
-                            "dc_power": 100,
-                            "charge_soc": 90,
-                            "dis_charge_soc": 10,
-                        }
-                    ],
-                },
-            },
+            "reserve_soc": 15,
+            "time": [
+                {
+                    "cs_time": "03:00",
+                    "ce_time": "05:00",
+                    "c_power": 100,
+                    "dcs_time": "05:00",
+                    "dce_time": "03:00",
+                    "dc_power": 100,
+                    "charge_soc": 90,
+                    "dis_charge_soc": 10,
+                }
+            ],
         },
     }
 
@@ -478,3 +457,119 @@ def test_auth_attempt_summary_lists_all_attempts() -> None:
     assert "home_v3[home/2.8.0]" in api.last_auth_attempt_summary
     assert "legacy_v0[web]" in api.last_auth_attempt_summary
     assert "sha256_v3" in api.last_auth_attempt_summary
+
+
+def test_get_station_details_uses_station_find_endpoint() -> None:
+    """Station detail reads should pass the station id as an integer."""
+    session = FakeSession(
+        [
+            {
+                "status": "0",
+                "message": "success",
+                "data": {"id": 123, "name": "Roof"},
+            }
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    details = asyncio.run(api.get_station_details("123"))
+
+    assert details == {"id": 123, "name": "Roof"}
+    assert session.requests[0]["kwargs"]["json"] == {"id": 123}
+
+
+def test_get_relay_settings_success_exposes_payload() -> None:
+    """Successful relay reads should preserve the nested payload."""
+    session = FakeSession(
+        [
+            {
+                "status": "0",
+                "message": "success",
+                "data": "relay-job",
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": {
+                    "code": 0,
+                    "data": {
+                        "mode": 0,
+                        "data": {
+                            "k_2": {"mode": 2},
+                            "k_3": {"mode": 0},
+                        },
+                    },
+                },
+            },
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    relay_settings = asyncio.run(api.get_relay_settings("123"))
+
+    assert relay_settings["readable"] is True
+    assert relay_settings["writable"] is True
+    assert relay_settings["data"]["data"]["k_2"]["mode"] == 2
+    assert session.requests[0]["kwargs"]["json"] == {"action": 1014, "data": {"sid": 123}}
+    assert session.requests[1]["kwargs"]["json"] == {"id": "relay-job"}
+
+
+def test_set_relay_enabled_turns_on_default_nested_mode() -> None:
+    """Relay enable writes should seed a default k_2 mode when the payload is fully off."""
+    session = FakeSession(
+        [
+            {
+                "status": "0",
+                "message": "success",
+                "data": "relay-read",
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": {
+                    "code": 0,
+                    "data": {
+                        "mode": 0,
+                        "data": {
+                            "k_2": {"mode": 0},
+                            "k_3": {"mode": 0},
+                        },
+                    },
+                },
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": "relay-write",
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": {"code": 0, "data": []},
+            },
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    success = asyncio.run(api.set_relay_enabled("123", True))
+
+    assert success is True
+    assert session.requests[2]["kwargs"]["json"] == {
+        "action": 1014,
+        "data": {
+            "sid": 123,
+            "data": {
+                "mode": 1,
+                "data": {
+                    "k_2": {"mode": 2},
+                    "k_3": {"mode": 0},
+                },
+            },
+        },
+    }
