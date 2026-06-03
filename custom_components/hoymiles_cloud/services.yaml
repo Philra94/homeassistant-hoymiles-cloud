@@ -1,6 +1,6 @@
 set_battery_mode:
   name: Set battery mode
-  description: Activate a Hoymiles battery mode for a station.
+  description: Activate a Hoymiles battery mode for a station using the direct battery-config write path.
   fields:
     station_id:
       name: Station ID
@@ -29,7 +29,8 @@ set_battery_mode_settings:
   name: Set battery mode settings
   description: >
     Update the structured payload for a Hoymiles battery mode and activate that mode.
-    This is intended for advanced settings such as Economy and Time of Use schedules.
+    This uses the direct battery-config write path and is intended for advanced settings
+    such as Economy and Time of Use schedules.
   fields:
     station_id:
       name: Station ID

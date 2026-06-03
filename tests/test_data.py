@@ -3,11 +3,14 @@ from tests.module_loader import load_integration_module
 
 data_module = load_integration_module("data")
 build_empty_battery_settings = data_module.build_empty_battery_settings
+build_empty_relay_settings = data_module.build_empty_relay_settings
 build_schedule_editor_state = data_module.build_schedule_editor_state
 build_schedule_payload_from_draft = data_module.build_schedule_payload_from_draft
 build_station_capabilities = data_module.build_station_capabilities
 discover_pv_channels = data_module.discover_pv_channels
+get_allowed_battery_modes = data_module.get_allowed_battery_modes
 get_schedule_modes = data_module.get_schedule_modes
+relay_settings_enabled = data_module.relay_settings_enabled
 validate_schedule_draft = data_module.validate_schedule_draft
 
 
@@ -37,12 +40,25 @@ def test_build_station_capabilities_keeps_battery_telemetry_separate() -> None:
             status="3",
             message="No Permission.",
         ),
+        relay_settings=build_empty_relay_settings(
+            readable=True,
+            writable=True,
+        ),
+        devices={"batteries": [{"sn": "BAT-1"}], "meters": [{"location": 2}], "dtus": [], "inverters": []},
+        setting_rules={"ctl_mode_set": [1, 8]},
+        eps_settings={"details": {"p": "0.31", "sep": "0.11"}},
+        ai_status={"ai": 1},
         microinverters_data={},
     )
 
     assert capabilities["battery_telemetry"] is True
     assert capabilities["battery_settings_readable"] is False
     assert capabilities["battery_settings_writable"] is False
+    assert capabilities["relay_settings_readable"] is True
+    assert capabilities["has_battery"] is True
+    assert capabilities["has_meter"] is True
+    assert capabilities["eps_available"] is True
+    assert capabilities["ai_available"] is True
     assert capabilities["pv_channels"] == [1]
 
 
@@ -189,3 +205,25 @@ def test_validate_schedule_draft_reports_invalid_times() -> None:
 
     assert errors
     assert "invalid cs_time" in errors[0]
+
+
+def test_get_allowed_battery_modes_honors_ctl_mode_set() -> None:
+    """Station rules should restrict selectable battery modes when present."""
+    battery_settings = build_empty_battery_settings(readable=True, writable=True)
+    battery_settings["available_modes"] = [1, 2, 5, 8]
+
+    assert get_allowed_battery_modes(battery_settings, {"ctl_mode_set": [2, 8]}) == [2, 8]
+
+
+def test_relay_settings_enabled_detects_nested_modes() -> None:
+    """Relay enablement should inspect nested k_2 / k_3 modes."""
+    relay_settings = build_empty_relay_settings(readable=True, writable=True)
+    relay_settings["data"] = {
+        "mode": 0,
+        "data": {
+            "k_2": {"mode": 2},
+            "k_3": {"mode": 0},
+        },
+    }
+
+    assert relay_settings_enabled(relay_settings) is True

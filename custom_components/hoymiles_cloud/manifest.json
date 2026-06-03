@@ -5,8 +5,10 @@
   "config_flow": true,
   "documentation": "https://github.com/Philra94/homeassistant-hoymiles-cloud",
   "issue_tracker": "https://github.com/Philra94/homeassistant-hoymiles-cloud/issues",
+  "integration_type": "hub",
   "iot_class": "cloud_polling",
-  "version": "0.5.0",
+  "single_config_entry": false,
+  "version": "1.0.0",
   "requirements": [
     "aiohttp>=3.8.0",
     "argon2-cffi>=21.3.0"

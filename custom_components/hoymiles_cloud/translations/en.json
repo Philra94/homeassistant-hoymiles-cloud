@@ -6,21 +6,43 @@
         "description": "Enter your Hoymiles Cloud credentials",
         "data": {
           "username": "Username (Email)",
-          "password": "Password"
+          "password": "Password",
+          "auth_mode": "Authentication mode",
+          "app_version": "Override app version (optional)"
         }
+      },
+      "confirm": {
+        "title": "Confirm Stations",
+        "description": "Authentication succeeded. The following stations were discovered: {stations}"
       }
+    },
+    "progress": {
+      "confirm": {
+        "description": "Verifying credentials and discovering stations"
+      }
+    },
+    "abort": {
+      "already_configured": "Account already configured"
     },
     "error": {
       "cannot_connect": "Failed to connect to Hoymiles Cloud",
       "invalid_auth": "Invalid authentication",
       "app_update_required": "Hoymiles rejected the login because the client version is too old",
-      "s_miles_home_required": "This account appears to require a different Hoymiles login type (for example S-Miles Home)",
+      "s_miles_home_required": "This is a consumer S-Miles Home account (typical for MS-A2 balcony storage). It uses a different Hoymiles backend that this integration does not support yet, so changing the authentication mode will not help. See https://github.com/Philra94/homeassistant-hoymiles-cloud/issues/30 if you can help capture the app's login details.",
       "no_stations": "No stations found for this account",
       "no_accessible_stations": "Authentication succeeded, but no accessible stations were returned for this account",
       "unknown": "Unexpected error"
     },
-    "abort": {
-      "already_configured": "Account already configured"
+    "selector": {
+      "auth_mode": {
+        "options": {
+          "auto": "Auto-detect",
+          "web_v3": "S-Miles Cloud Web",
+          "installer_v3": "S-Miles Installer",
+          "home_v3": "S-Miles Home (not yet supported)",
+          "legacy_v0": "Legacy v0"
+        }
+      }
     }
   },
   "options": {
@@ -29,7 +51,10 @@
         "title": "Hoymiles Cloud Options",
         "description": "Configure the integration options",
         "data": {
-          "scan_interval": "Data update interval (seconds)"
+          "scan_interval": "Data update interval (seconds)",
+          "fetch_grid_indicators": "Fetch 3-phase grid indicators",
+          "fetch_energy_flow": "Fetch daily energy-flow statistics",
+          "fetch_eps_profit": "Fetch EPS profit and spend statistics"
         }
       }
     }

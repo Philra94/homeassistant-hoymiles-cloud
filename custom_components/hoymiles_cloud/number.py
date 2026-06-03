@@ -12,13 +12,16 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
 from .const import (
+    BATTERY_MODE_BACKUP_MAX_POWER,
     BATTERY_MODE_ECONOMY,
     BATTERY_MODE_PEAK_SHAVING,
+    BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER,
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_MODES,
     DOMAIN,
 )
-from .data import battery_settings_writable, get_mode_settings, get_supported_modes
+from .data import battery_settings_writable, get_allowed_battery_modes, get_mode_settings
+from .device import build_primary_battery_device_info
 from .hoymiles_api import HoymilesAPI
 from .schedule_editor import (
     build_device_info,
@@ -52,7 +55,10 @@ async def async_setup_entry(
         if not battery_settings_writable(battery_settings):
             continue
 
-        supported_modes = get_supported_modes(battery_settings)
+        supported_modes = get_allowed_battery_modes(
+            battery_settings,
+            station_data.get("setting_rules", {}),
+        )
         for mode in supported_modes:
             mode_settings = get_mode_settings(battery_settings, mode)
             if "reserve_soc" in mode_settings:
@@ -64,6 +70,16 @@ async def async_setup_entry(
                         station_name=station_name,
                         mode=mode,
                         update_soc_callback=update_soc,
+                    )
+                )
+            if mode in (BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER, BATTERY_MODE_BACKUP_MAX_POWER) and "max_power" in mode_settings:
+                entities.append(
+                    HoymilesBatteryMaxPower(
+                        coordinator=coordinator,
+                        api=api,
+                        station_id=station_id,
+                        station_name=station_name,
+                        mode=mode,
                     )
                 )
 
@@ -102,9 +118,9 @@ async def async_setup_entry(
                         _tou_period_path,
                         "c_power",
                         0,
-                        20000,
                         100,
-                        "W",
+                        1,
+                        PERCENTAGE,
                     ),
                     HoymilesScheduleNumberEntity(
                         coordinator,
@@ -117,9 +133,9 @@ async def async_setup_entry(
                         _tou_period_path,
                         "dc_power",
                         0,
-                        20000,
                         100,
-                        "W",
+                        1,
+                        PERCENTAGE,
                     ),
                     HoymilesScheduleNumberEntity(
                         coordinator,
@@ -201,7 +217,11 @@ class HoymilesBatteryNumberEntity(CoordinatorEntity, NumberEntity):
         super().__init__(coordinator)
         self._api = api
         self._station_id = station_id
-        self._attr_device_info = build_device_info(station_id, station_name)
+        self._attr_device_info = build_primary_battery_device_info(
+            station_id,
+            station_name,
+            get_station_data(coordinator, station_id),
+        )
         self._attr_entity_category = EntityCategory.CONFIG
 
     def _get_station_data(self) -> dict:
@@ -274,6 +294,48 @@ class HoymilesBatteryReserveSOC(HoymilesBatteryNumberEntity):
         self.async_write_ha_state()
 
 
+class HoymilesBatteryMaxPower(HoymilesBatteryNumberEntity):
+    """Entity for controlling mode 5/6 max_power."""
+
+    def __init__(
+        self,
+        coordinator: DataUpdateCoordinator,
+        api: HoymilesAPI,
+        station_id: str,
+        station_name: str,
+        mode: int,
+    ) -> None:
+        """Initialize the max power control."""
+        super().__init__(coordinator, api, station_id, station_name)
+        self._mode = mode
+        self._mode_name = BATTERY_MODES.get(mode, f"Mode {mode}")
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_battery_max_power_{mode}"
+        self._attr_name = f"{station_name} Battery Max Power ({self._mode_name})"
+        self._attr_native_min_value = 0
+        self._attr_native_max_value = 100
+        self._attr_native_step = 1
+        self._attr_mode = NumberMode.SLIDER
+        self._attr_native_unit_of_measurement = PERCENTAGE
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current value."""
+        value = get_mode_settings(self._get_battery_settings(), self._mode).get("max_power")
+        return float(value) if value is not None else None
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set the max power percentage."""
+        if not await self._api.set_battery_mode_settings(
+            self._station_id,
+            self._mode,
+            {"max_power": float(value)},
+        ):
+            return
+
+        await self.coordinator.async_request_refresh()
+        self.async_write_ha_state()
+
+
 class HoymilesPeakShavingMaxSOC(HoymilesBatteryNumberEntity):
     """Entity for controlling Peak Shaving Mode's max_soc parameter."""
 
@@ -334,7 +396,7 @@ class HoymilesPeakShavingMeterPower(HoymilesBatteryNumberEntity):
         self._attr_unique_id = f"{DOMAIN}_{station_id}_peak_shaving_meter_power"
         self._attr_name = f"{station_name} Peak Shaving Meter Power"
         self._attr_native_min_value = 0
-        self._attr_native_max_value = 10000
+        self._attr_native_max_value = 60000
         self._attr_native_step = 100
         self._attr_mode = NumberMode.BOX
         self._attr_native_unit_of_measurement = "W"

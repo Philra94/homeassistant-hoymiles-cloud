@@ -2,6 +2,7 @@
 from copy import deepcopy
 import logging
 from datetime import timedelta
+import time
 from typing import Any
 
 import async_timeout
@@ -15,7 +16,23 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 import voluptuous as vol
 
-from .const import BATTERY_MODE_IDS, DEFAULT_SCAN_INTERVAL, DOMAIN, STORAGE_KEY, STORAGE_VERSION
+from .const import (
+    AUTH_MODE_AUTO,
+    BATTERY_MODE_IDS,
+    CONF_APP_VERSION,
+    CONF_AUTH_MODE,
+    CONF_FETCH_ENERGY_FLOW,
+    CONF_FETCH_EPS_PROFIT,
+    CONF_FETCH_GRID_INDICATORS,
+    DEFAULT_FETCH_ENERGY_FLOW,
+    DEFAULT_FETCH_EPS_PROFIT,
+    DEFAULT_FETCH_GRID_INDICATORS,
+    DEFAULT_SCAN_INTERVAL,
+    DEFAULT_STATIC_REFRESH_INTERVAL,
+    DOMAIN,
+    STORAGE_KEY,
+    STORAGE_VERSION,
+)
 from .data import (
     add_schedule_entry,
     battery_settings_readable,
@@ -28,10 +45,19 @@ from .data import (
     update_schedule_editor_draft,
 )
 from .hoymiles_api import HoymilesAPI
+from .models import AIStatus, DeviceInventory, EPSProfit, EnergyFlow, FirmwareStatus, SettingRules, StationData
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.SENSOR, Platform.NUMBER, Platform.SELECT, Platform.TEXT, Platform.BUTTON]
+PLATFORMS = [
+    Platform.SENSOR,
+    Platform.BINARY_SENSOR,
+    Platform.NUMBER,
+    Platform.SELECT,
+    Platform.TEXT,
+    Platform.BUTTON,
+    Platform.SWITCH,
+]
 
 SERVICE_SET_BATTERY_MODE = "set_battery_mode"
 SERVICE_SET_BATTERY_MODE_SETTINGS = "set_battery_mode_settings"
@@ -350,9 +376,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     username = entry.data[CONF_USERNAME]
     password = entry.data[CONF_PASSWORD]
     scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    auth_mode = entry.data.get(CONF_AUTH_MODE, AUTH_MODE_AUTO)
+    app_version = entry.data.get(CONF_APP_VERSION)
+    fetch_grid_indicators = entry.options.get(
+        CONF_FETCH_GRID_INDICATORS,
+        DEFAULT_FETCH_GRID_INDICATORS,
+    )
+    fetch_energy_flow = entry.options.get(
+        CONF_FETCH_ENERGY_FLOW,
+        DEFAULT_FETCH_ENERGY_FLOW,
+    )
+    fetch_eps_profit = entry.options.get(
+        CONF_FETCH_EPS_PROFIT,
+        DEFAULT_FETCH_EPS_PROFIT,
+    )
 
     session = async_get_clientsession(hass)
     api = HoymilesAPI(session, username, password)
+    api.configure_auth(auth_mode=auth_mode, app_version=app_version)
     store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
     stored_data = await store.async_load() or {}
 
@@ -379,6 +420,88 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if _ensure_station_storage(stored_data, stations):
         await store.async_save(stored_data)
 
+    static_station_cache: dict[str, dict[str, Any]] = {}
+    static_station_cache_at: dict[str, float] = {}
+
+    async def _async_fetch_static_station_payload(station_id: str) -> dict[str, Any]:
+        """Fetch slower-changing station metadata and device inventory."""
+        try:
+            station_info = await api.get_station_details(station_id)
+        except Exception as err:
+            _LOGGER.warning("Failed to get station details for station %s: %s", station_id, err)
+            station_info = {}
+        if station_info.get("name"):
+            stations[station_id] = str(station_info["name"])
+
+        try:
+            setting_rules = await api.get_setting_rules(station_id)
+        except Exception as err:
+            _LOGGER.warning("Failed to get setting rules for station %s: %s", station_id, err)
+            setting_rules = {}
+
+        try:
+            dtus = await api.get_dtus(station_id)
+        except Exception as err:
+            _LOGGER.warning("Failed to get DTUs for station %s: %s", station_id, err)
+            dtus = []
+
+        try:
+            inverters = await api.get_inverters(station_id)
+        except Exception as err:
+            _LOGGER.warning("Failed to get inverters for station %s: %s", station_id, err)
+            inverters = []
+
+        try:
+            batteries = await api.get_batteries(station_id)
+        except Exception as err:
+            _LOGGER.warning("Failed to get batteries for station %s: %s", station_id, err)
+            batteries = []
+
+        try:
+            meters = await api.get_meters(station_id)
+        except Exception as err:
+            _LOGGER.warning("Failed to get meters for station %s: %s", station_id, err)
+            meters = []
+
+        try:
+            microinverters = await api.get_microinverters_by_stations(station_id)
+        except Exception as err:
+            _LOGGER.warning("Failed to get microinverter details for station %s: %s", station_id, err)
+            microinverters = {}
+
+        try:
+            eps_settings = await api.get_eps_settings(station_id)
+        except Exception as err:
+            _LOGGER.warning("Failed to get EPS settings for station %s: %s", station_id, err)
+            eps_settings = {}
+
+        try:
+            ai_status = await api.get_ai_status(station_id)
+        except Exception as err:
+            _LOGGER.warning("Failed to get AI status for station %s: %s", station_id, err)
+            ai_status = {}
+
+        try:
+            firmware = await api.get_firmware_status(station_id)
+        except Exception as err:
+            _LOGGER.warning("Failed to get firmware status for station %s: %s", station_id, err)
+            firmware = {}
+
+        return {
+            "station_info": station_info,
+            "setting_rules": SettingRules(setting_rules).as_dict(),
+            "devices": DeviceInventory(
+                dtus=dtus,
+                inverters=inverters,
+                batteries=batteries,
+                meters=meters,
+                microinverters=microinverters,
+            ).as_dict(),
+            "eps_settings": eps_settings,
+            "ai_status": AIStatus(ai_status).as_dict(),
+            "firmware": FirmwareStatus(firmware).as_dict(),
+        }
+
     async def async_update_data():
         """Fetch data from API."""
         try:
@@ -394,17 +517,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 should_save_store = False
 
                 for station_id in stations:
-                    real_time_data = await api.get_real_time_data(station_id)
+                    now = time.monotonic()
+                    if (
+                        station_id not in static_station_cache
+                        or now - static_station_cache_at.get(station_id, 0) >= DEFAULT_STATIC_REFRESH_INTERVAL
+                    ):
+                        static_station_cache[station_id] = await _async_fetch_static_station_payload(station_id)
+                        static_station_cache_at[station_id] = now
+                    static_payload = static_station_cache.get(station_id, {})
 
-                    try:
-                        microinverters_data = await api.get_microinverters_by_stations(station_id)
-                    except Exception as err:
-                        _LOGGER.warning(
-                            "Failed to get microinverter details for station %s: %s",
-                            station_id,
-                            err,
-                        )
-                        microinverters_data = {}
+                    real_time_data = await api.get_real_time_data(station_id)
 
                     try:
                         pv_indicators = await api.get_pv_indicators(station_id)
@@ -416,6 +538,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
                         pv_indicators = {}
 
+                    if fetch_grid_indicators:
+                        try:
+                            grid_indicators = await api.get_grid_indicators(station_id)
+                        except Exception as err:
+                            _LOGGER.warning(
+                                "Failed to get grid indicators for station %s: %s",
+                                station_id,
+                                err,
+                            )
+                            grid_indicators = {}
+                    else:
+                        grid_indicators = {}
+
+                    try:
+                        load_indicators = await api.get_load_indicators(station_id)
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "Failed to get load indicators for station %s: %s",
+                            station_id,
+                            err,
+                        )
+                        load_indicators = {}
+
                     try:
                         battery_settings = await api.get_battery_settings(station_id)
                     except Exception as err:
@@ -426,6 +571,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
                         battery_settings = {}
 
+                    try:
+                        relay_settings = await api.get_relay_settings(station_id)
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "Failed to get relay settings for station %s: %s",
+                            station_id,
+                            err,
+                        )
+                        relay_settings = {}
+
+                    if fetch_energy_flow:
+                        try:
+                            energy_flow = await api.get_energy_flow(station_id)
+                        except Exception as err:
+                            _LOGGER.warning(
+                                "Failed to get energy flow for station %s: %s",
+                                station_id,
+                                err,
+                            )
+                            energy_flow = {}
+                    else:
+                        energy_flow = {}
+
+                    if fetch_eps_profit:
+                        try:
+                            eps_profit = await api.get_eps_profit(station_id)
+                        except Exception as err:
+                            _LOGGER.warning(
+                                "Failed to get EPS profit for station %s: %s",
+                                station_id,
+                                err,
+                            )
+                            eps_profit = {}
+                    else:
+                        eps_profit = {}
+
                     station_stored_data = stored_data["stations"].setdefault(station_id, {})
                     enhanced_battery_settings, station_changed = _enhance_battery_settings(
                         battery_settings,
@@ -433,22 +614,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     should_save_store = should_save_store or station_changed
 
-                    refreshed[station_id] = {
-                        "real_time_data": real_time_data,
-                        "microinverters_data": microinverters_data,
-                        "pv_indicators": pv_indicators,
-                        "battery_settings": enhanced_battery_settings,
-                        "schedule_editor": build_schedule_editor_state(
+                    refreshed[station_id] = StationData(
+                        station_info=static_payload.get("station_info", {}),
+                        real_time_data=real_time_data,
+                        energy_flow=EnergyFlow(energy_flow).as_dict(),
+                        pv_indicators=pv_indicators,
+                        grid_indicators=grid_indicators,
+                        load_indicators=load_indicators,
+                        battery_settings=enhanced_battery_settings,
+                        relay_settings=relay_settings,
+                        eps_settings=static_payload.get("eps_settings", {}),
+                        eps_profit=EPSProfit(eps_profit).as_dict(),
+                        ai_status=static_payload.get("ai_status", {}),
+                        setting_rules=static_payload.get("setting_rules", {}),
+                        devices=static_payload.get("devices", {}),
+                        firmware=static_payload.get("firmware", {}),
+                        schedule_editor=build_schedule_editor_state(
                             enhanced_battery_settings,
                             station_stored_data,
                         ),
-                        "capabilities": build_station_capabilities(
+                        capabilities=build_station_capabilities(
                             real_time_data=real_time_data,
                             pv_indicators=pv_indicators,
                             battery_settings=enhanced_battery_settings,
-                            microinverters_data=microinverters_data,
+                            microinverters_data=static_payload.get("devices", {}).get("microinverters", {}),
+                            grid_indicators=grid_indicators,
+                            load_indicators=load_indicators,
+                            energy_flow=energy_flow,
+                            relay_settings=relay_settings,
+                            setting_rules=static_payload.get("setting_rules", {}),
+                            devices=static_payload.get("devices", {}),
+                            eps_settings=static_payload.get("eps_settings", {}),
+                            eps_profit=eps_profit,
+                            ai_status=static_payload.get("ai_status", {}),
+                            firmware=static_payload.get("firmware", {}),
+                            station_info=static_payload.get("station_info", {}),
                         ),
-                    }
+                    ).as_dict()
 
                 if should_save_store:
                     await store.async_save(stored_data)
@@ -477,6 +679,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "store": store,
         "stored_data": stored_data,
         "entry": entry,
+        "static_station_cache": static_station_cache,
+        "fetch_grid_indicators": fetch_grid_indicators,
+        "fetch_energy_flow": fetch_energy_flow,
+        "fetch_eps_profit": fetch_eps_profit,
     }
 
     def async_refresh_local_editor_state(station_id: str | None = None) -> None:

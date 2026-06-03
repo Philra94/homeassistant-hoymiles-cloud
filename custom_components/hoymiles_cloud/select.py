@@ -13,7 +13,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpda
 
 from .const import BATTERY_MODES, DOMAIN
 from .const import BATTERY_MODE_ECONOMY, BATTERY_MODE_TIME_OF_USE
-from .data import battery_settings_writable, get_supported_modes
+from .data import battery_settings_writable, get_allowed_battery_modes
+from .device import build_primary_battery_device_info
 from .hoymiles_api import HoymilesAPI
 from .schedule_editor import (
     build_device_info,
@@ -49,7 +50,10 @@ async def async_setup_entry(
     for station_id, station_name in stations.items():
         station_data = coordinator.data.get(station_id, {}) if coordinator.data else {}
         battery_settings = station_data.get("battery_settings", {})
-        if battery_settings_writable(battery_settings) and get_supported_modes(battery_settings):
+        if battery_settings_writable(battery_settings) and get_allowed_battery_modes(
+            battery_settings,
+            station_data.get("setting_rules", {}),
+        ):
             entities.append(
                 HoymilesBatteryModeSelect(
                     coordinator=coordinator,
@@ -114,7 +118,11 @@ class HoymilesBatteryModeSelect(CoordinatorEntity, SelectEntity):
         self._attr_unique_id = f"{DOMAIN}_{station_id}_battery_mode_select"
         self._attr_name = f"{station_name} Battery Mode"
         self._attr_entity_category = EntityCategory.CONFIG
-        self._attr_device_info = build_device_info(station_id, station_name)
+        self._attr_device_info = build_primary_battery_device_info(
+            station_id,
+            station_name,
+            get_station_data(coordinator, station_id),
+        )
         self._attr_options = self._get_current_options()
 
     def _get_station_data(self) -> dict:
@@ -123,10 +131,11 @@ class HoymilesBatteryModeSelect(CoordinatorEntity, SelectEntity):
 
     def _get_current_options(self) -> list[str]:
         """Return supported mode options for this station."""
+        station_data = self._get_station_data()
         battery_settings = self._get_station_data().get("battery_settings", {})
         return [
             MODE_OPTIONS[mode]
-            for mode in get_supported_modes(battery_settings)
+            for mode in get_allowed_battery_modes(battery_settings, station_data.get("setting_rules", {}))
             if mode in MODE_OPTIONS
         ]
 

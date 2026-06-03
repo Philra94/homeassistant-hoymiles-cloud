@@ -3,6 +3,7 @@ import asyncio
 import base64
 import binascii
 from copy import deepcopy
+from datetime import datetime
 import hashlib
 import json
 import logging
@@ -11,25 +12,44 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
-from .auth import AuthAttempt, choose_preferred_failure, summarize_auth_attempts
+from .auth import (
+    AUTH_ERROR_S_MILES_HOME_REQUIRED,
+    AuthAttempt,
+    choose_preferred_failure,
+    summarize_auth_attempts,
+)
 from .const import (
-    API_AUTH_URL,
-    API_AUTH_PRE_INSP_URL,
-    API_AUTH_V3_URL,
+    AUTH_PATH_LOGIN_V0,
+    AUTH_PATH_PRE_INSP_V3,
+    AUTH_PATH_LOGIN_V3,
     API_USER_ME_URL,
     API_STATIONS_URL,
+    API_STATION_BATTERY_CONFIG_URL,
+    API_STATION_DETAILS_URL,
+    API_STATION_SETTING_RULE_URL,
     API_REAL_TIME_DATA_URL,
+    API_ENERGY_FLOW_STATS_URL,
     API_MICROINVERTERS_URL,
     API_MICRO_DETAIL_URL,
-    API_PV_INDICATORS_URL,
+    API_DTUS_URL,
+    API_INVERTERS_URL,
+    API_BATTERIES_URL,
+    API_METERS_URL,
+    API_INDICATORS_URL,
     API_BATTERY_SETTINGS_READ_URL,
     API_BATTERY_SETTINGS_WRITE_URL,
     API_BATTERY_SETTINGS_STATUS_URL,
+    API_EPS_SETTINGS_URL,
+    API_EPS_PROFIT_URL,
+    API_AI_STATUS_URL,
+    API_FIRMWARE_STATUS_URL,
     BATTERY_MODE_ECONOMY,
     BATTERY_MODE_IDS,
     BATTERY_MODE_SELF_CONSUMPTION,
+    BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER,
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_MODE_BACKUP,
+    BATTERY_MODE_BACKUP_MAX_POWER,
     BATTERY_MODES,
     AUTH_MODE_AUTO,
     AUTH_MODE_HOME_V3,
@@ -41,12 +61,22 @@ from .const import (
     CLIENT_PROFILE_HOME,
     CLIENT_PROFILE_INSTALLER,
     CLIENT_PROFILE_WEB,
+    INDICATOR_TYPE_GRID,
+    INDICATOR_TYPE_LOAD,
+    INDICATOR_TYPE_PV,
+    ENERGY_FLOW_STAT_TYPE_FULL,
+    BATTERY_SETTINGS_ACTION_ID,
+    RELAY_SETTINGS_ACTION_ID,
+    BATTERY_SETTINGS_STATUS_RUNNING,
+    BATTERY_SETTINGS_STATUS_SUCCESS,
 )
 from .data import (
     MODE_KEY_MAPPING,
     battery_settings_readable,
     build_empty_battery_settings,
+    build_empty_relay_settings,
     get_mode_settings,
+    relay_settings_readable,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,13 +87,11 @@ DEFAULT_MODE_SETTINGS: dict[int, dict[str, Any]] = {
     BATTERY_MODE_ECONOMY: {"reserve_soc": 10, "money_code": "$", "date": []},
     BATTERY_MODE_BACKUP: {"reserve_soc": 100},
     4: {},
+    BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER: {"reserve_soc": 70, "max_power": 50.0},
+    BATTERY_MODE_BACKUP_MAX_POWER: {"reserve_soc": 30, "max_power": 50.0},
     7: {"reserve_soc": 30, "max_soc": 70, "meter_power": 3000},
     BATTERY_MODE_TIME_OF_USE: {"reserve_soc": 10},
 }
-
-BATTERY_SETTINGS_ACTION_ID = 1013
-BATTERY_SETTINGS_STATUS_RUNNING = 2
-BATTERY_SETTINGS_STATUS_SUCCESS = 0
 BATTERY_SETTINGS_MAX_POLLS = 10
 BATTERY_SETTINGS_POLL_INTERVAL = 1.0
 
@@ -89,6 +117,7 @@ class HoymilesAPI:
         self._last_auth_attempts: list[AuthAttempt] = []
         self._auth_mode_preference = AUTH_MODE_AUTO
         self._app_version_override: str | None = None
+        self._auth_base_url_override: str | None = None
         self._active_client_profile = CLIENT_PROFILE_WEB
         self._active_app_version: str | None = None
 
@@ -136,10 +165,33 @@ class HoymilesAPI:
         *,
         auth_mode: str = AUTH_MODE_AUTO,
         app_version: str | None = None,
+        auth_base_url: str | None = None,
     ) -> None:
-        """Persist auth preferences for future login attempts."""
+        """Persist auth preferences for future login attempts.
+
+        ``auth_base_url`` is an advanced override that points the auth
+        endpoints at a different host (e.g. a candidate S-Miles Home consumer
+        backend discovered via a network trace). It wins over the per-profile
+        default and is intended for investigation via
+        ``scripts/test_login_flow.py`` rather than the end-user config flow.
+        """
         self._auth_mode_preference = auth_mode
         self._app_version_override = app_version.strip() if app_version else None
+        self._auth_base_url_override = auth_base_url.strip() if auth_base_url else None
+
+    def _auth_url(self, client_profile: str, path: str) -> str | None:
+        """Resolve the full auth URL for a profile, honoring any override.
+
+        Returns ``None`` when the profile has no configured backend host
+        (e.g. the S-Miles Home consumer backend is not yet known), so callers
+        can fail fast instead of silently falling back to the wrong host.
+        """
+        base_url = self._auth_base_url_override or AUTH_PROFILE_DEFAULTS[client_profile].get(
+            "base_url"
+        )
+        if not base_url:
+            return None
+        return f"{base_url.rstrip('/')}{path}"
 
     def _set_auth_failure(self, status: Optional[str], message: Optional[str]) -> None:
         """Store the most recent authentication failure."""
@@ -211,6 +263,81 @@ class HoymilesAPI:
             headers["Authorization"] = self._token
         return headers
 
+    async def _ensure_authenticated(self) -> None:
+        """Authenticate if needed before an API request."""
+        if not self._token or self.is_token_expired():
+            await self.authenticate()
+
+    async def _post_json(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        authenticated: bool = True,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Send a POST request and decode the JSON body."""
+        if authenticated:
+            await self._ensure_authenticated()
+        request_headers = headers or (self._auth_headers() if authenticated else self._json_headers())
+        async with self._session.post(url, headers=request_headers, json=payload) as response:
+            resp_text = await response.text()
+        return json.loads(resp_text)
+
+    async def _fetch_paged_station_list(
+        self,
+        url: str,
+        station_id: str,
+        *,
+        page_size: int = 100,
+        extra_payload: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return a full paginated list for one station-scoped endpoint."""
+        items: list[dict[str, Any]] = []
+        page_num = 1
+        total: int | None = None
+        extra_payload = extra_payload or {}
+
+        while True:
+            payload = {
+                "sid": int(station_id),
+                "page_size": page_size,
+                "page_num": page_num,
+                **extra_payload,
+            }
+            response = await self._post_json(url, payload)
+            if response.get("status") != "0" or response.get("message") != "success":
+                _LOGGER.debug(
+                    "Paged station request to %s failed for %s: %s - %s",
+                    url,
+                    station_id,
+                    response.get("status"),
+                    response.get("message"),
+                )
+                return []
+
+            data = response.get("data", {})
+            page_items = data.get("list", []) if isinstance(data, dict) else []
+            if not isinstance(page_items, list):
+                return []
+            items.extend(item for item in page_items if isinstance(item, dict))
+
+            if total is None and isinstance(data, dict) and data.get("total") is not None:
+                try:
+                    total = int(data["total"])
+                except (TypeError, ValueError):
+                    total = None
+
+            if not page_items:
+                break
+            if total is not None and len(items) >= total:
+                break
+            if len(page_items) < page_size:
+                break
+            page_num += 1
+
+        return items
+
     def _record_auth_failure(self, attempt: AuthAttempt) -> AuthAttempt:
         """Persist a failed auth attempt."""
         self._last_auth_attempt = attempt.method
@@ -234,12 +361,22 @@ class HoymilesAPI:
             return [(AUTH_MODE_LEGACY_V0, CLIENT_PROFILE_WEB)]
         if auth_mode in AUTH_MODE_TO_PROFILE:
             return [(auth_mode, AUTH_MODE_TO_PROFILE[auth_mode])]
-        return [
+        # Auto-detect: skip profiles whose backend host is unresolved (e.g. the
+        # S-Miles Home consumer backend), so a wrong password is not mislabeled
+        # as an S-Miles Home account. Such profiles are only tried when the user
+        # selects them explicitly.
+        candidates = [
             (AUTH_MODE_WEB_V3, CLIENT_PROFILE_WEB),
             (AUTH_MODE_INSTALLER_V3, CLIENT_PROFILE_INSTALLER),
             (AUTH_MODE_HOME_V3, CLIENT_PROFILE_HOME),
-            (AUTH_MODE_LEGACY_V0, CLIENT_PROFILE_WEB),
         ]
+        attempts = [
+            (mode, profile)
+            for mode, profile in candidates
+            if self._auth_url(profile, AUTH_PATH_LOGIN_V3) is not None
+        ]
+        attempts.append((AUTH_MODE_LEGACY_V0, CLIENT_PROFILE_WEB))
+        return attempts
 
     def _parse_pre_insp_response(
         self,
@@ -305,11 +442,12 @@ class HoymilesAPI:
         method_name: str,
         headers: dict[str, str],
         app_version: str | None,
+        url: str,
     ) -> AuthAttempt | tuple[dict[str, Any], str | None]:
         """Run v3 pre-inspection and return normalized data or a failed attempt."""
         try:
             async with self._session.post(
-                API_AUTH_PRE_INSP_URL,
+                url,
                 headers=headers,
                 json={"u": self._username},
             ) as response:
@@ -371,11 +509,12 @@ class HoymilesAPI:
         credential_hash: str,
         nonce: str,
         variant_name: str,
+        url: str,
     ) -> AuthAttempt:
         """Attempt a single v3 login candidate."""
         try:
             async with self._session.post(
-                API_AUTH_V3_URL,
+                url,
                 headers=headers,
                 json={"u": self._username, "ch": credential_hash, "n": nonce},
             ) as response:
@@ -448,12 +587,32 @@ class HoymilesAPI:
         app_version = self._resolve_app_version(client_profile)
         headers = self._json_headers(client_profile=client_profile, app_version=app_version)
 
+        # Resolve the backend host for this profile. A missing host means the
+        # profile's backend is not yet known (e.g. the S-Miles Home consumer
+        # backend), so fail fast instead of hitting the wrong host.
+        pre_insp_url = self._auth_url(client_profile, AUTH_PATH_PRE_INSP_V3)
+        login_url = self._auth_url(client_profile, AUTH_PATH_LOGIN_V3)
+        if not pre_insp_url or not login_url:
+            return self._record_auth_failure(
+                AuthAttempt(
+                    method=method_name,
+                    client_profile=client_profile,
+                    success=False,
+                    message=(
+                        "S-Miles Home backend not yet configured. This account type "
+                        "is not supported yet (see GitHub issue #30)."
+                    ),
+                    app_version=app_version,
+                )
+            )
+
         # Step 1: Pre-inspection — get server-provided salt and nonce
         pre_insp_result = await self._pre_inspect_v3(
             client_profile=client_profile,
             method_name=method_name,
             headers=headers,
             app_version=app_version,
+            url=pre_insp_url,
         )
         if isinstance(pre_insp_result, AuthAttempt):
             return pre_insp_result
@@ -511,6 +670,7 @@ class HoymilesAPI:
                 credential_hash=ch,
                 nonce=nonce,
                 variant_name=auth_method,
+                url=login_url,
             )
 
         last_failure: AuthAttempt | None = None
@@ -521,6 +681,7 @@ class HoymilesAPI:
                     method_name=method_name,
                     headers=headers,
                     app_version=app_version,
+                    url=pre_insp_url,
                 )
                 if isinstance(retry_pre_insp_result, AuthAttempt):
                     return retry_pre_insp_result
@@ -534,6 +695,7 @@ class HoymilesAPI:
                 credential_hash=candidate_hash,
                 nonce=nonce,
                 variant_name=variant_name,
+                url=login_url,
             )
             if attempt.success:
                 return attempt
@@ -559,9 +721,10 @@ class HoymilesAPI:
             "user_name": self._username,
             "password": md5_password,
         }
+        url = self._auth_url(CLIENT_PROFILE_WEB, AUTH_PATH_LOGIN_V0)
         try:
             async with self._session.post(
-                API_AUTH_URL, headers=headers, json=data
+                url, headers=headers, json=data
             ) as response:
                 resp = await response.json()
         except Exception as e:
@@ -613,9 +776,16 @@ class HoymilesAPI:
             attempts: list[AuthAttempt] = []
             for attempt_mode, client_profile in self._build_auth_attempts(selected_auth_mode):
                 if attempt_mode == AUTH_MODE_LEGACY_V0:
-                    attempts.append(await self._authenticate_legacy())
+                    attempt = await self._authenticate_legacy()
                 else:
-                    attempts.append(await self._authenticate_v3(client_profile=client_profile))
+                    attempt = await self._authenticate_v3(client_profile=client_profile)
+                attempts.append(attempt)
+
+                # Once the server reports the account is restricted to the
+                # S-Miles Home app, the remaining profiles hit the same host
+                # and fail identically. Stop early to avoid pointless retries.
+                if not attempt.success and attempt.error_key == AUTH_ERROR_S_MILES_HOME_REQUIRED:
+                    break
 
             self._last_auth_attempts = attempts
             for attempt in attempts:
@@ -718,6 +888,135 @@ class HoymilesAPI:
         except Exception as e:
             _LOGGER.error("Error getting stations: %s", e)
             raise
+
+    async def get_station_details(self, station_id: str) -> dict[str, Any]:
+        """Return the full station details payload."""
+        response = await self._post_json(
+            API_STATION_DETAILS_URL,
+            {"id": int(station_id)},
+        )
+        if response.get("status") == "0" and response.get("message") == "success":
+            return response.get("data", {}) if isinstance(response.get("data"), dict) else {}
+        return {}
+
+    async def get_setting_rules(self, station_id: str) -> dict[str, Any]:
+        """Return station capability flags."""
+        response = await self._post_json(
+            API_STATION_SETTING_RULE_URL,
+            {"sid": int(station_id)},
+        )
+        if response.get("status") == "0" and response.get("message") == "success":
+            return response.get("data", {}) if isinstance(response.get("data"), dict) else {}
+        return {}
+
+    async def get_dtus(self, station_id: str) -> list[dict[str, Any]]:
+        """Return all DTUs for a station."""
+        return await self._fetch_paged_station_list(API_DTUS_URL, station_id)
+
+    async def get_inverters(self, station_id: str) -> list[dict[str, Any]]:
+        """Return all string inverters for a station."""
+        return await self._fetch_paged_station_list(API_INVERTERS_URL, station_id)
+
+    async def get_batteries(self, station_id: str) -> list[dict[str, Any]]:
+        """Return all batteries for a station."""
+        return await self._fetch_paged_station_list(API_BATTERIES_URL, station_id)
+
+    async def get_meters(self, station_id: str) -> list[dict[str, Any]]:
+        """Return all meters for a station."""
+        return await self._fetch_paged_station_list(API_METERS_URL, station_id)
+
+    async def get_indicator_data(
+        self,
+        station_id: str,
+        indicator_type: int,
+    ) -> dict[str, Any]:
+        """Return one indicator payload by type."""
+        response = await self._post_json(
+            API_INDICATORS_URL,
+            {"sid": int(station_id), "type": indicator_type},
+        )
+        if response.get("status") == "0" and response.get("message") == "success":
+            return response.get("data", {}) if isinstance(response.get("data"), dict) else {}
+        return {}
+
+    async def get_load_indicators(self, station_id: str) -> dict[str, Any]:
+        """Return load indicators."""
+        return await self.get_indicator_data(station_id, INDICATOR_TYPE_LOAD)
+
+    async def get_grid_indicators(self, station_id: str) -> dict[str, Any]:
+        """Return grid indicators."""
+        return await self.get_indicator_data(station_id, INDICATOR_TYPE_GRID)
+
+    async def get_energy_flow(
+        self,
+        station_id: str,
+        *,
+        mode: int = 1,
+        date: str | None = None,
+        flow_type: int = ENERGY_FLOW_STAT_TYPE_FULL,
+    ) -> dict[str, Any]:
+        """Return station energy-flow stats."""
+        if date is None:
+            if mode == 1:
+                date = datetime.now().strftime("%Y-%m-%d")
+            elif mode == 2:
+                date = datetime.now().strftime("%Y-%m")
+            elif mode == 3:
+                date = datetime.now().strftime("%Y")
+            else:
+                date = ""
+        response = await self._post_json(
+            API_ENERGY_FLOW_STATS_URL,
+            {
+                "sid": int(station_id),
+                "mode": mode,
+                "date": date,
+                "type": flow_type,
+            },
+        )
+        if response.get("status") == "0" and response.get("message") == "success":
+            return response.get("data", {}) if isinstance(response.get("data"), dict) else {}
+        return {}
+
+    async def get_eps_settings(self, station_id: str) -> dict[str, Any]:
+        """Return current EPS price settings."""
+        response = await self._post_json(
+            API_EPS_SETTINGS_URL,
+            {"sid": int(station_id)},
+        )
+        if response.get("status") == "0" and response.get("message") == "success":
+            return response.get("data", {}) if isinstance(response.get("data"), dict) else {}
+        return {}
+
+    async def get_eps_profit(self, station_id: str) -> dict[str, Any]:
+        """Return EPS profit and spend counters."""
+        response = await self._post_json(
+            API_EPS_PROFIT_URL,
+            {"sid": int(station_id)},
+        )
+        if response.get("status") == "0" and response.get("message") == "success":
+            return response.get("data", {}) if isinstance(response.get("data"), dict) else {}
+        return {}
+
+    async def get_ai_status(self, station_id: str) -> dict[str, Any]:
+        """Return AI mode metadata for a station."""
+        response = await self._post_json(
+            API_AI_STATUS_URL,
+            {"sid": int(station_id)},
+        )
+        if response.get("status") == "0" and response.get("message") == "success":
+            return response.get("data", {}) if isinstance(response.get("data"), dict) else {}
+        return {}
+
+    async def get_firmware_status(self, station_id: str) -> dict[str, Any]:
+        """Return firmware update availability for a station."""
+        response = await self._post_json(
+            API_FIRMWARE_STATUS_URL,
+            {"sid": int(station_id)},
+        )
+        if response.get("status") == "0" and response.get("message") == "success":
+            return response.get("data", {}) if isinstance(response.get("data"), dict) else {}
+        return {}
 
     async def get_microinverters_by_stations(self, station_id: str) -> Dict[str, str]:
         """Get all microinverters with detail for a station."""
@@ -841,32 +1140,7 @@ class HoymilesAPI:
 
     async def get_pv_indicators(self, station_id: str) -> Dict[str, Any]:
         """Get PV indicators data for a station."""
-        if not self._token or self.is_token_expired():
-            await self.authenticate()
-
-        data = {
-            "sid": int(station_id),
-            "type": 4  # PV indicators type
-        }
-        
-        try:
-            async with self._session.post(
-                API_PV_INDICATORS_URL, headers=self._auth_headers(), json=data
-            ) as response:
-                resp = await response.json()
-                
-                if resp.get("status") == "0" and resp.get("message") == "success":
-                    return resp.get("data", {})
-                else:
-                    _LOGGER.error(
-                        "Failed to get PV indicators data: %s - %s", 
-                        resp.get("status"), 
-                        resp.get("message")
-                    )
-                    return {}
-        except Exception as e:
-            _LOGGER.error("Error getting PV indicators data: %s", e)
-            raise
+        return await self.get_indicator_data(station_id, INDICATOR_TYPE_PV)
 
     async def get_battery_settings(self, station_id: str) -> Dict[str, Any]:
         """Get battery settings for a station."""
@@ -895,9 +1169,65 @@ class HoymilesAPI:
 
         return self._parse_battery_settings_response(final_response)
 
+    async def get_relay_settings(self, station_id: str) -> dict[str, Any]:
+        """Get relay / dry-contact settings for a station."""
+        await self._ensure_authenticated()
+        try:
+            response = await self._submit_battery_settings_command(
+                API_BATTERY_SETTINGS_READ_URL,
+                {
+                    "action": RELAY_SETTINGS_ACTION_ID,
+                    "data": {"sid": int(station_id)},
+                },
+                log_label=f"relay settings read for station {station_id}",
+            )
+            final_response = await self._resolve_battery_settings_command(
+                response,
+                expect_result=True,
+                command_label=f"relay settings read for station {station_id}",
+            )
+        except json.JSONDecodeError as err:
+            _LOGGER.warning("Error decoding relay settings JSON: %s", err)
+            return build_empty_relay_settings(message="Invalid relay settings response")
+        except Exception as err:
+            _LOGGER.warning("Error checking relay settings status: %s", err)
+            return build_empty_relay_settings(message="Unable to read relay settings")
+
+        return self._parse_relay_settings_response(final_response)
+
     def _default_mode_settings(self, mode: int) -> dict[str, Any]:
         """Return default settings for a battery mode."""
         return deepcopy(DEFAULT_MODE_SETTINGS.get(mode, {}))
+
+    def _parse_relay_settings_response(self, response: dict[str, Any]) -> dict[str, Any]:
+        """Normalize a completed relay settings response."""
+        if response.get("status") != "0" or response.get("message") != "success":
+            return build_empty_relay_settings(
+                status=str(response.get("status")),
+                message=str(response.get("message")),
+            )
+
+        response_data = response.get("data", {})
+        if not isinstance(response_data, dict):
+            return build_empty_relay_settings(message="Missing relay settings data")
+
+        status_code = response_data.get("code")
+        if status_code not in (None, BATTERY_SETTINGS_STATUS_SUCCESS):
+            return build_empty_relay_settings(
+                message=response_data.get("message") or "Relay settings are still pending",
+            )
+
+        settings_payload = response_data.get("data")
+        if not isinstance(settings_payload, dict):
+            return build_empty_relay_settings(message="Missing relay settings payload")
+
+        return {
+            "readable": True,
+            "writable": True,
+            "data": deepcopy(settings_payload),
+            "error_status": None,
+            "error_message": None,
+        }
 
     async def _submit_battery_settings_command(
         self,
@@ -1030,6 +1360,34 @@ class HoymilesAPI:
                 merged[key] = deepcopy(value)
         return merged
 
+    async def set_battery_config_direct(
+        self,
+        station_id: str,
+        mode: int,
+        mode_settings: dict[str, Any],
+    ) -> bool:
+        """Write a full battery-mode payload through the direct PVM endpoint."""
+        await self._ensure_authenticated()
+        response = await self._post_json(
+            API_STATION_BATTERY_CONFIG_URL,
+            {
+                "sid": int(station_id),
+                "mode": mode,
+                "data": deepcopy(mode_settings),
+            },
+        )
+        if response.get("status") == "0" and response.get("message") == "success":
+            return bool(response.get("data", True))
+
+        _LOGGER.error(
+            "Failed direct battery write for station %s mode %s: %s - %s",
+            station_id,
+            mode,
+            response.get("status"),
+            response.get("message"),
+        )
+        return False
+
     async def _write_battery_mode_payload(
         self, station_id: str, mode: int, mode_settings: dict[str, Any]
     ) -> bool:
@@ -1098,6 +1456,44 @@ class HoymilesAPI:
         )
         return False
 
+    async def _write_relay_payload(self, station_id: str, relay_payload: dict[str, Any]) -> bool:
+        """Write a relay payload through the async control endpoint."""
+        await self._ensure_authenticated()
+        try:
+            response = await self._submit_battery_settings_command(
+                API_BATTERY_SETTINGS_WRITE_URL,
+                {
+                    "action": RELAY_SETTINGS_ACTION_ID,
+                    "data": {
+                        "sid": int(station_id),
+                        "data": deepcopy(relay_payload),
+                    },
+                },
+                log_label=f"relay settings write for station {station_id}",
+            )
+            resolved = await self._resolve_battery_settings_command(
+                response,
+                expect_result=False,
+                command_label=f"relay settings write for station {station_id}",
+            )
+        except json.JSONDecodeError as err:
+            _LOGGER.error("Error decoding relay settings write response: %s", err)
+            return False
+        except Exception as err:
+            _LOGGER.error("Error writing relay settings: %s", err)
+            raise
+
+        if resolved.get("status") == "0" and resolved.get("message") == "success":
+            status_data = resolved.get("data", {})
+            if isinstance(status_data, dict) and status_data.get("code") not in (
+                None,
+                BATTERY_SETTINGS_STATUS_SUCCESS,
+            ):
+                return False
+            return True
+
+        return False
+
     async def _get_writable_mode_settings(
         self, station_id: str, mode: int
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
@@ -1148,7 +1544,7 @@ class HoymilesAPI:
             mode_settings.setdefault("money_code", "$")
             mode_settings.setdefault("date", [])
 
-        return await self._write_battery_mode_payload(station_id, mode, mode_settings)
+        return await self.set_battery_config_direct(station_id, mode, mode_settings)
 
     async def set_battery_mode(self, station_id: str, mode: int) -> bool:
         """Set battery mode for a station."""
@@ -1165,7 +1561,7 @@ class HoymilesAPI:
             BATTERY_MODES.get(mode),
             station_id,
         )
-        return await self._write_battery_mode_payload(station_id, mode, mode_settings)
+        return await self.set_battery_config_direct(station_id, mode, mode_settings)
 
     async def set_reserve_soc(self, station_id: str, reserve_soc: int) -> bool:
         """Set battery reserve SOC for a station."""
@@ -1212,3 +1608,34 @@ class HoymilesAPI:
             7,
             updates,
         )
+
+    async def set_relay_enabled(self, station_id: str, enabled: bool) -> bool:
+        """Enable or disable dry-contact control using the current relay payload."""
+        relay_settings = await self.get_relay_settings(station_id)
+        if not relay_settings_readable(relay_settings):
+            _LOGGER.warning("Relay settings are unavailable for station %s", station_id)
+            return False
+
+        relay_payload = deepcopy(relay_settings.get("data", {}))
+        if not isinstance(relay_payload, dict):
+            return False
+
+        nested = relay_payload.setdefault("data", {})
+        if not isinstance(nested, dict):
+            nested = {}
+            relay_payload["data"] = nested
+
+        if enabled:
+            if relay_payload.get("mode") in (None, 0):
+                relay_payload["mode"] = 1
+            if nested.get("k_2", {}).get("mode", 0) == 0 and nested.get("k_3", {}).get("mode", 0) == 0:
+                nested.setdefault("k_2", {})
+                nested["k_2"]["mode"] = 2
+        else:
+            relay_payload["mode"] = 0
+            if isinstance(nested.get("k_2"), dict):
+                nested["k_2"]["mode"] = 0
+            if isinstance(nested.get("k_3"), dict):
+                nested["k_3"]["mode"] = 0
+
+        return await self._write_relay_payload(station_id, relay_payload)
