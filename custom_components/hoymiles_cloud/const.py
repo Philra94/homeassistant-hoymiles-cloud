@@ -11,10 +11,15 @@ API_BASE_URL = "https://neapi.hoymiles.com"
 API_EU_BASE_URL = "https://euapi.hoymiles.com"
 API_STREAM_BASE_URL = "https://eurt.hoymiles.com"
 
-# Authentication endpoints
-API_AUTH_URL = f"{API_BASE_URL}/iam/pub/0/auth/login"
-API_AUTH_PRE_INSP_URL = f"{API_BASE_URL}/iam/pub/3/auth/pre-insp"
-API_AUTH_V3_URL = f"{API_BASE_URL}/iam/pub/3/auth/login"
+# Authentication endpoint paths (joined with a profile-specific base URL)
+AUTH_PATH_LOGIN_V0 = "/iam/pub/0/auth/login"
+AUTH_PATH_PRE_INSP_V3 = "/iam/pub/3/auth/pre-insp"
+AUTH_PATH_LOGIN_V3 = "/iam/pub/3/auth/login"
+
+# Authentication endpoints (default neapi host; kept for backwards compatibility)
+API_AUTH_URL = f"{API_BASE_URL}{AUTH_PATH_LOGIN_V0}"
+API_AUTH_PRE_INSP_URL = f"{API_BASE_URL}{AUTH_PATH_PRE_INSP_V3}"
+API_AUTH_V3_URL = f"{API_BASE_URL}{AUTH_PATH_LOGIN_V3}"
 API_USER_ME_URL = f"{API_BASE_URL}/iam/api/1/user/me"
 
 # Station and device endpoints
@@ -70,16 +75,25 @@ AUTH_PROFILE_DEFAULTS = {
         "user_agent": DEFAULT_WEB_USER_AGENT,
         "app_version": None,
         "x_client_type": None,
+        "base_url": API_BASE_URL,
     },
     CLIENT_PROFILE_INSTALLER: {
         "user_agent": DEFAULT_INSTALLER_USER_AGENT,
         "app_version": DEFAULT_INSTALLER_APP_VERSION,
         "x_client_type": "mobile",
+        "base_url": API_BASE_URL,
     },
     CLIENT_PROFILE_HOME: {
         "user_agent": DEFAULT_HOME_USER_AGENT,
         "app_version": DEFAULT_HOME_APP_VERSION,
         "x_client_type": "mobile",
+        # TODO: S-Miles Home consumer backend. Consumer "S-Miles Home" /
+        # "S-Miles Enduser" accounts (e.g. MS-A2 balcony storage) live on a
+        # different Hoymiles backend than neapi.hoymiles.com. Once a sanitized
+        # network trace of the S-Miles Home mobile app login is available, set
+        # this to the real host (and adjust headers/request body as needed).
+        # See GitHub issue #30.
+        "base_url": None,
     },
 }
 
@@ -93,7 +107,7 @@ AUTH_MODE_OPTIONS = {
     AUTH_MODE_AUTO: "Auto-detect",
     AUTH_MODE_WEB_V3: "S-Miles Cloud Web",
     AUTH_MODE_INSTALLER_V3: "S-Miles Installer",
-    AUTH_MODE_HOME_V3: "S-Miles Home",
+    AUTH_MODE_HOME_V3: "S-Miles Home (not yet supported)",
     AUTH_MODE_LEGACY_V0: "Legacy v0",
 }
 

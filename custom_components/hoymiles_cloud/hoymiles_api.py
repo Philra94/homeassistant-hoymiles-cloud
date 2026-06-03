@@ -12,11 +12,16 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 
-from .auth import AuthAttempt, choose_preferred_failure, summarize_auth_attempts
+from .auth import (
+    AUTH_ERROR_S_MILES_HOME_REQUIRED,
+    AuthAttempt,
+    choose_preferred_failure,
+    summarize_auth_attempts,
+)
 from .const import (
-    API_AUTH_URL,
-    API_AUTH_PRE_INSP_URL,
-    API_AUTH_V3_URL,
+    AUTH_PATH_LOGIN_V0,
+    AUTH_PATH_PRE_INSP_V3,
+    AUTH_PATH_LOGIN_V3,
     API_USER_ME_URL,
     API_STATIONS_URL,
     API_STATION_BATTERY_CONFIG_URL,
@@ -112,6 +117,7 @@ class HoymilesAPI:
         self._last_auth_attempts: list[AuthAttempt] = []
         self._auth_mode_preference = AUTH_MODE_AUTO
         self._app_version_override: str | None = None
+        self._auth_base_url_override: str | None = None
         self._active_client_profile = CLIENT_PROFILE_WEB
         self._active_app_version: str | None = None
 
@@ -159,10 +165,33 @@ class HoymilesAPI:
         *,
         auth_mode: str = AUTH_MODE_AUTO,
         app_version: str | None = None,
+        auth_base_url: str | None = None,
     ) -> None:
-        """Persist auth preferences for future login attempts."""
+        """Persist auth preferences for future login attempts.
+
+        ``auth_base_url`` is an advanced override that points the auth
+        endpoints at a different host (e.g. a candidate S-Miles Home consumer
+        backend discovered via a network trace). It wins over the per-profile
+        default and is intended for investigation via
+        ``scripts/test_login_flow.py`` rather than the end-user config flow.
+        """
         self._auth_mode_preference = auth_mode
         self._app_version_override = app_version.strip() if app_version else None
+        self._auth_base_url_override = auth_base_url.strip() if auth_base_url else None
+
+    def _auth_url(self, client_profile: str, path: str) -> str | None:
+        """Resolve the full auth URL for a profile, honoring any override.
+
+        Returns ``None`` when the profile has no configured backend host
+        (e.g. the S-Miles Home consumer backend is not yet known), so callers
+        can fail fast instead of silently falling back to the wrong host.
+        """
+        base_url = self._auth_base_url_override or AUTH_PROFILE_DEFAULTS[client_profile].get(
+            "base_url"
+        )
+        if not base_url:
+            return None
+        return f"{base_url.rstrip('/')}{path}"
 
     def _set_auth_failure(self, status: Optional[str], message: Optional[str]) -> None:
         """Store the most recent authentication failure."""
@@ -332,12 +361,22 @@ class HoymilesAPI:
             return [(AUTH_MODE_LEGACY_V0, CLIENT_PROFILE_WEB)]
         if auth_mode in AUTH_MODE_TO_PROFILE:
             return [(auth_mode, AUTH_MODE_TO_PROFILE[auth_mode])]
-        return [
+        # Auto-detect: skip profiles whose backend host is unresolved (e.g. the
+        # S-Miles Home consumer backend), so a wrong password is not mislabeled
+        # as an S-Miles Home account. Such profiles are only tried when the user
+        # selects them explicitly.
+        candidates = [
             (AUTH_MODE_WEB_V3, CLIENT_PROFILE_WEB),
             (AUTH_MODE_INSTALLER_V3, CLIENT_PROFILE_INSTALLER),
             (AUTH_MODE_HOME_V3, CLIENT_PROFILE_HOME),
-            (AUTH_MODE_LEGACY_V0, CLIENT_PROFILE_WEB),
         ]
+        attempts = [
+            (mode, profile)
+            for mode, profile in candidates
+            if self._auth_url(profile, AUTH_PATH_LOGIN_V3) is not None
+        ]
+        attempts.append((AUTH_MODE_LEGACY_V0, CLIENT_PROFILE_WEB))
+        return attempts
 
     def _parse_pre_insp_response(
         self,
@@ -403,11 +442,12 @@ class HoymilesAPI:
         method_name: str,
         headers: dict[str, str],
         app_version: str | None,
+        url: str,
     ) -> AuthAttempt | tuple[dict[str, Any], str | None]:
         """Run v3 pre-inspection and return normalized data or a failed attempt."""
         try:
             async with self._session.post(
-                API_AUTH_PRE_INSP_URL,
+                url,
                 headers=headers,
                 json={"u": self._username},
             ) as response:
@@ -469,11 +509,12 @@ class HoymilesAPI:
         credential_hash: str,
         nonce: str,
         variant_name: str,
+        url: str,
     ) -> AuthAttempt:
         """Attempt a single v3 login candidate."""
         try:
             async with self._session.post(
-                API_AUTH_V3_URL,
+                url,
                 headers=headers,
                 json={"u": self._username, "ch": credential_hash, "n": nonce},
             ) as response:
@@ -546,12 +587,32 @@ class HoymilesAPI:
         app_version = self._resolve_app_version(client_profile)
         headers = self._json_headers(client_profile=client_profile, app_version=app_version)
 
+        # Resolve the backend host for this profile. A missing host means the
+        # profile's backend is not yet known (e.g. the S-Miles Home consumer
+        # backend), so fail fast instead of hitting the wrong host.
+        pre_insp_url = self._auth_url(client_profile, AUTH_PATH_PRE_INSP_V3)
+        login_url = self._auth_url(client_profile, AUTH_PATH_LOGIN_V3)
+        if not pre_insp_url or not login_url:
+            return self._record_auth_failure(
+                AuthAttempt(
+                    method=method_name,
+                    client_profile=client_profile,
+                    success=False,
+                    message=(
+                        "S-Miles Home backend not yet configured. This account type "
+                        "is not supported yet (see GitHub issue #30)."
+                    ),
+                    app_version=app_version,
+                )
+            )
+
         # Step 1: Pre-inspection — get server-provided salt and nonce
         pre_insp_result = await self._pre_inspect_v3(
             client_profile=client_profile,
             method_name=method_name,
             headers=headers,
             app_version=app_version,
+            url=pre_insp_url,
         )
         if isinstance(pre_insp_result, AuthAttempt):
             return pre_insp_result
@@ -609,6 +670,7 @@ class HoymilesAPI:
                 credential_hash=ch,
                 nonce=nonce,
                 variant_name=auth_method,
+                url=login_url,
             )
 
         last_failure: AuthAttempt | None = None
@@ -619,6 +681,7 @@ class HoymilesAPI:
                     method_name=method_name,
                     headers=headers,
                     app_version=app_version,
+                    url=pre_insp_url,
                 )
                 if isinstance(retry_pre_insp_result, AuthAttempt):
                     return retry_pre_insp_result
@@ -632,6 +695,7 @@ class HoymilesAPI:
                 credential_hash=candidate_hash,
                 nonce=nonce,
                 variant_name=variant_name,
+                url=login_url,
             )
             if attempt.success:
                 return attempt
@@ -657,9 +721,10 @@ class HoymilesAPI:
             "user_name": self._username,
             "password": md5_password,
         }
+        url = self._auth_url(CLIENT_PROFILE_WEB, AUTH_PATH_LOGIN_V0)
         try:
             async with self._session.post(
-                API_AUTH_URL, headers=headers, json=data
+                url, headers=headers, json=data
             ) as response:
                 resp = await response.json()
         except Exception as e:
@@ -711,9 +776,16 @@ class HoymilesAPI:
             attempts: list[AuthAttempt] = []
             for attempt_mode, client_profile in self._build_auth_attempts(selected_auth_mode):
                 if attempt_mode == AUTH_MODE_LEGACY_V0:
-                    attempts.append(await self._authenticate_legacy())
+                    attempt = await self._authenticate_legacy()
                 else:
-                    attempts.append(await self._authenticate_v3(client_profile=client_profile))
+                    attempt = await self._authenticate_v3(client_profile=client_profile)
+                attempts.append(attempt)
+
+                # Once the server reports the account is restricted to the
+                # S-Miles Home app, the remaining profiles hit the same host
+                # and fail identically. Stop early to avoid pointless retries.
+                if not attempt.success and attempt.error_key == AUTH_ERROR_S_MILES_HOME_REQUIRED:
+                    break
 
             self._last_auth_attempts = attempts
             for attempt in attempts:
