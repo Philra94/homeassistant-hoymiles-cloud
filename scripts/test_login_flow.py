@@ -90,6 +90,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the app version used for installer/home auth attempts.",
     )
     parser.add_argument(
+        "--auth-base-url",
+        default=None,
+        help=(
+            "Advanced: override the auth backend host (e.g. a candidate S-Miles "
+            "Home consumer backend discovered via a network trace), such as "
+            "https://example.hoymiles.com."
+        ),
+    )
+    parser.add_argument(
+        "--dump-raw",
+        action="store_true",
+        help=(
+            "Print the sanitized raw pre-inspection request/response for the "
+            "selected profile/host, formatted for pasting into a GitHub issue."
+        ),
+    )
+    parser.add_argument(
         "--mobile-app-version",
         dest="app_version",
         default=None,
@@ -128,6 +145,65 @@ def redact_token(token: str | None) -> str:
     return f"{token[:8]}...{token[-4:]}"
 
 
+SENSITIVE_KEYS = ("a", "ch", "token", "salt", "password", "pwd")
+
+
+def sanitize_payload(value: Any) -> Any:
+    """Recursively mask password/salt/token-derived values for safe sharing."""
+    if isinstance(value, dict):
+        return {
+            key: ("<redacted>" if key.lower() in SENSITIVE_KEYS else sanitize_payload(val))
+            for key, val in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize_payload(item) for item in value]
+    return value
+
+
+def sanitize_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Mask any auth-bearing headers before printing."""
+    masked = {}
+    for key, val in headers.items():
+        masked[key] = "<redacted>" if key.lower() in ("authorization", "cookie") else val
+    return masked
+
+
+async def dump_raw_pre_insp(api: Any, session: "aiohttp.ClientSession", auth_mode: str) -> None:
+    """Print the sanitized raw pre-inspection request/response for diagnostics.
+
+    The pre-inspection call only sends the username, so its request body is safe
+    to share once the email is masked. Its response reveals the salt field ``a``
+    (or its absence), which is what distinguishes Hoymiles account families.
+    """
+    const = sys.modules[f"{PACKAGE_NAME}.const"]
+    profile = const.AUTH_MODE_TO_PROFILE.get(auth_mode, const.CLIENT_PROFILE_WEB)
+    url = api._auth_url(profile, const.AUTH_PATH_PRE_INSP_V3)  # noqa: SLF001
+    print("\n=== RAW pre-insp dump (safe to paste into a GitHub issue) ===")
+    if not url:
+        print(f"Profile '{profile}' has no configured backend host (base_url is None).")
+        print("Use --auth-base-url to point at a candidate host.")
+        return
+
+    headers = api._json_headers(client_profile=profile)  # noqa: SLF001
+    print(f"POST {url}")
+    print("Request headers:")
+    print(json.dumps(sanitize_headers(headers), indent=2, sort_keys=True))
+    print('Request body: {"u": "<redacted-email>"}')
+    try:
+        async with session.post(url, headers=headers, json={"u": api._username}) as response:  # noqa: SLF001
+            body = await response.json(content_type=None)
+            print(f"Response status (HTTP): {response.status}")
+            print("Response body:")
+            print(json.dumps(sanitize_payload(body), indent=2, sort_keys=True))
+    except Exception as err:  # noqa: BLE001
+        print(f"Pre-insp request failed: {err}")
+    print(
+        "\nNote: the follow-up /auth/login body is {u, ch, n} where 'ch' is a "
+        "password-derived hash (redacted above). Share the login HTTP status and "
+        "message from the attempt summary instead.\n"
+    )
+
+
 def summarize_user(user: dict[str, Any]) -> dict[str, Any]:
     """Return a small, stable subset of user data."""
     interesting_keys = (
@@ -154,9 +230,19 @@ async def main() -> int:
     print(f"Username: {username}")
     print(f"Auth mode: {args.auth_mode}")
 
+    if args.auth_base_url:
+        print(f"Auth base URL override: {args.auth_base_url}")
+
     async with aiohttp.ClientSession() as session:
         api = HoymilesAPI(session, username, password)
-        api.configure_auth(auth_mode=args.auth_mode, app_version=args.app_version)
+        api.configure_auth(
+            auth_mode=args.auth_mode,
+            app_version=args.app_version,
+            auth_base_url=args.auth_base_url,
+        )
+
+        if args.dump_raw:
+            await dump_raw_pre_insp(api, session, args.auth_mode)
 
         if args.try_matrix:
             matrix = [
@@ -168,7 +254,11 @@ async def main() -> int:
             overall_success = False
             print("Trying auth matrix...")
             for auth_mode, app_version in matrix:
-                api.configure_auth(auth_mode=auth_mode, app_version=app_version)
+                api.configure_auth(
+                    auth_mode=auth_mode,
+                    app_version=app_version,
+                    auth_base_url=args.auth_base_url,
+                )
                 authenticated = await api.authenticate()
                 status = "OK" if authenticated else "FAILED"
                 detail = api.auth_method if authenticated else api.last_auth_attempt_summary
