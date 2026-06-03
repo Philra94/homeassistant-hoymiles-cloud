@@ -171,8 +171,8 @@ def test_get_battery_settings_success_exposes_available_modes() -> None:
     assert api._session.requests[1]["kwargs"]["json"] == {"id": "job-123"}
 
 
-def test_set_battery_mode_polls_write_job_until_complete() -> None:
-    """Battery mode writes should follow the async write -> status polling flow."""
+def test_set_battery_mode_uses_direct_write_payload() -> None:
+    """Battery mode writes should use the direct station battery-config endpoint."""
     session = FakeSession(
         [
             {
@@ -196,17 +196,7 @@ def test_set_battery_mode_polls_write_job_until_complete() -> None:
             {
                 "status": "0",
                 "message": "success",
-                "data": "write-job",
-            },
-            {
-                "status": "0",
-                "message": "success",
-                "data": {"code": 2, "data": []},
-            },
-            {
-                "status": "0",
-                "message": "success",
-                "data": {"code": 0, "data": []},
+                "data": True,
             },
         ]
     )
@@ -218,11 +208,10 @@ def test_set_battery_mode_polls_write_job_until_complete() -> None:
 
     assert success is True
     assert session.requests[2]["kwargs"]["json"] == {
-        "action": 1013,
-        "data": {"sid": 123, "data": {"mode": 1, "data": {"reserve_soc": 10}}},
+        "sid": 123,
+        "mode": 1,
+        "data": {"reserve_soc": 10},
     }
-    assert session.requests[3]["kwargs"]["json"] == {"id": "write-job"}
-    assert session.requests[4]["kwargs"]["json"] == {"id": "write-job"}
 
 
 def test_set_battery_mode_settings_merges_into_existing_schedule_payload() -> None:
@@ -264,12 +253,7 @@ def test_set_battery_mode_settings_merges_into_existing_schedule_payload() -> No
             {
                 "status": "0",
                 "message": "success",
-                "data": "write-job",
-            },
-            {
-                "status": "0",
-                "message": "success",
-                "data": {"code": 0, "data": []},
+                "data": True,
             },
         ]
     )
@@ -283,27 +267,22 @@ def test_set_battery_mode_settings_merges_into_existing_schedule_payload() -> No
 
     assert success is True
     assert session.requests[2]["kwargs"]["json"] == {
-        "action": 1013,
+        "sid": 123,
+        "mode": 8,
         "data": {
-            "sid": 123,
-            "data": {
-                "mode": 8,
-                "data": {
-                    "reserve_soc": 15,
-                    "time": [
-                        {
-                            "cs_time": "03:00",
-                            "ce_time": "05:00",
-                            "c_power": 100,
-                            "dcs_time": "05:00",
-                            "dce_time": "03:00",
-                            "dc_power": 100,
-                            "charge_soc": 90,
-                            "dis_charge_soc": 10,
-                        }
-                    ],
-                },
-            },
+            "reserve_soc": 15,
+            "time": [
+                {
+                    "cs_time": "03:00",
+                    "ce_time": "05:00",
+                    "c_power": 100,
+                    "dcs_time": "05:00",
+                    "dce_time": "03:00",
+                    "dc_power": 100,
+                    "charge_soc": 90,
+                    "dis_charge_soc": 10,
+                }
+            ],
         },
     }
 
@@ -396,7 +375,11 @@ def test_decode_v3_salt_still_accepts_base64() -> None:
 
 
 def test_configured_auth_preferences_affect_future_attempts() -> None:
-    """Configured auth preferences should affect subsequent authenticate calls."""
+    """Configured auth preferences should affect subsequent authenticate calls.
+
+    The S-Miles Home profile has no built-in backend host, so an explicit
+    ``auth_base_url`` override is supplied to point it at a candidate host.
+    """
     session = FakeSession(
         [
             {"status": "0", "message": "success", "data": {"a": None, "n": "nonce1"}},
@@ -404,7 +387,11 @@ def test_configured_auth_preferences_affect_future_attempts() -> None:
         ]
     )
     api = HoymilesAPI(session, "user@example.com", "secret")
-    api.configure_auth(auth_mode="home_v3", app_version="2.8.0")
+    api.configure_auth(
+        auth_mode="home_v3",
+        app_version="2.8.0",
+        auth_base_url="https://home.example.com",
+    )
 
     authenticated = asyncio.run(api.authenticate())
 
@@ -412,6 +399,53 @@ def test_configured_auth_preferences_affect_future_attempts() -> None:
     assert api.auth_method == "home_v3:sha256_v3"
     assert api.last_auth_attempt == "home_v3"
     assert session.requests[0]["kwargs"]["headers"]["User-Agent"] == "S-Miles Home/2.8.0"
+    # The override host is honored for both pre-insp and login.
+    assert session.requests[0]["args"][0] == "https://home.example.com/iam/pub/3/auth/pre-insp"
+    assert session.requests[1]["args"][0] == "https://home.example.com/iam/pub/3/auth/login"
+
+
+def test_home_profile_fails_fast_without_backend_host() -> None:
+    """Explicitly selecting S-Miles Home with no backend host should fail fast."""
+    session = FakeSession([])
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api.configure_auth(auth_mode="home_v3")
+
+    authenticated = asyncio.run(api.authenticate())
+
+    assert authenticated is False
+    assert api.last_auth_error_key == AUTH_ERROR_S_MILES_HOME_REQUIRED
+    # No network request is made when the backend host is unknown.
+    assert session.requests == []
+
+
+def test_auto_detect_skips_home_profile_without_backend_host() -> None:
+    """Auto-detect should not attempt (or mislabel via) the home profile.
+
+    A wrong-password account must surface invalid_auth, not s_miles_home_required.
+    """
+    session = FakeSession(
+        [
+            # web_v3
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce1"}},
+            {"status": "1", "message": "Invalid credentials"},
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce2"}},
+            {"status": "1", "message": "Invalid credentials"},
+            # installer_v3
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce3"}},
+            {"status": "1", "message": "Invalid credentials"},
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce4"}},
+            {"status": "1", "message": "Invalid credentials"},
+            # legacy_v0
+            {"status": "1", "message": "Log in failed. Please check your account and password."},
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+
+    authenticated = asyncio.run(api.authenticate())
+
+    assert authenticated is False
+    assert "home_v3" not in api.last_auth_attempt_summary
+    assert api.last_auth_error_key != AUTH_ERROR_S_MILES_HOME_REQUIRED
 
 
 def test_unsalted_v3_retries_with_sha256_hex_variant() -> None:
@@ -455,17 +489,22 @@ def test_pre_insp_accepts_top_level_payload_shape() -> None:
     assert api.auth_method == "web_v3:sha256_v3"
 
 
-def test_auth_attempt_summary_lists_all_attempts() -> None:
-    """Failed auth runs should keep a readable attempt summary."""
+def test_auth_attempt_summary_records_attempted_profiles() -> None:
+    """Failed auth runs should keep a readable summary of attempted profiles."""
     session = FakeSession(
         [
+            # web_v3
             {"status": "0", "message": "success", "data": {"a": None, "n": "nonce1"}},
             {"status": "1", "message": "Invalid credentials"},
             {"status": "0", "message": "success", "data": {"a": None, "n": "nonce2"}},
             {"status": "1", "message": "Your app version is low. Please update to the latest version."},
+            # installer_v3
             {"status": "0", "message": "success", "data": {"a": None, "n": "nonce3"}},
-            {"status": "1", "message": "Can only login to the S-Miles Home."},
             {"status": "1", "message": "Invalid credentials"},
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce4"}},
+            {"status": "1", "message": "Invalid credentials"},
+            # legacy_v0
+            {"status": "1", "message": "Log in failed. Please check your account and password."},
         ]
     )
     api = HoymilesAPI(session, "user@example.com", "secret")
@@ -475,6 +514,143 @@ def test_auth_attempt_summary_lists_all_attempts() -> None:
     assert authenticated is False
     assert "web_v3[web]" in api.last_auth_attempt_summary
     assert "installer_v3[installer/3.7.1]" in api.last_auth_attempt_summary
-    assert "home_v3[home/2.8.0]" in api.last_auth_attempt_summary
     assert "legacy_v0[web]" in api.last_auth_attempt_summary
-    assert "sha256_v3" in api.last_auth_attempt_summary
+    # The home profile has no backend host, so auto-detect skips it.
+    assert "home_v3[home/2.8.0]" not in api.last_auth_attempt_summary
+    assert "sha256_hex_v3" in api.last_auth_attempt_summary
+
+
+def test_auto_detect_short_circuits_on_s_miles_home_gate() -> None:
+    """Auto-detect should stop as soon as the S-Miles Home gate is returned."""
+    session = FakeSession(
+        [
+            # web_v3 returns the account-type gate on the first login attempt.
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce1"}},
+            {"status": "1", "message": "Can only login to the S-Miles Home."},
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+
+    authenticated = asyncio.run(api.authenticate())
+
+    assert authenticated is False
+    assert api.last_auth_error_key == AUTH_ERROR_S_MILES_HOME_REQUIRED
+    # Only web_v3 was attempted; installer/legacy were not tried.
+    assert "installer_v3" not in api.last_auth_attempt_summary
+    assert "legacy_v0" not in api.last_auth_attempt_summary
+
+
+def test_get_station_details_uses_station_find_endpoint() -> None:
+    """Station detail reads should pass the station id as an integer."""
+    session = FakeSession(
+        [
+            {
+                "status": "0",
+                "message": "success",
+                "data": {"id": 123, "name": "Roof"},
+            }
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    details = asyncio.run(api.get_station_details("123"))
+
+    assert details == {"id": 123, "name": "Roof"}
+    assert session.requests[0]["kwargs"]["json"] == {"id": 123}
+
+
+def test_get_relay_settings_success_exposes_payload() -> None:
+    """Successful relay reads should preserve the nested payload."""
+    session = FakeSession(
+        [
+            {
+                "status": "0",
+                "message": "success",
+                "data": "relay-job",
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": {
+                    "code": 0,
+                    "data": {
+                        "mode": 0,
+                        "data": {
+                            "k_2": {"mode": 2},
+                            "k_3": {"mode": 0},
+                        },
+                    },
+                },
+            },
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    relay_settings = asyncio.run(api.get_relay_settings("123"))
+
+    assert relay_settings["readable"] is True
+    assert relay_settings["writable"] is True
+    assert relay_settings["data"]["data"]["k_2"]["mode"] == 2
+    assert session.requests[0]["kwargs"]["json"] == {"action": 1014, "data": {"sid": 123}}
+    assert session.requests[1]["kwargs"]["json"] == {"id": "relay-job"}
+
+
+def test_set_relay_enabled_turns_on_default_nested_mode() -> None:
+    """Relay enable writes should seed a default k_2 mode when the payload is fully off."""
+    session = FakeSession(
+        [
+            {
+                "status": "0",
+                "message": "success",
+                "data": "relay-read",
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": {
+                    "code": 0,
+                    "data": {
+                        "mode": 0,
+                        "data": {
+                            "k_2": {"mode": 0},
+                            "k_3": {"mode": 0},
+                        },
+                    },
+                },
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": "relay-write",
+            },
+            {
+                "status": "0",
+                "message": "success",
+                "data": {"code": 0, "data": []},
+            },
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    success = asyncio.run(api.set_relay_enabled("123", True))
+
+    assert success is True
+    assert session.requests[2]["kwargs"]["json"] == {
+        "action": 1014,
+        "data": {
+            "sid": 123,
+            "data": {
+                "mode": 1,
+                "data": {
+                    "k_2": {"mode": 2},
+                    "k_3": {"mode": 0},
+                },
+            },
+        },
+    }
