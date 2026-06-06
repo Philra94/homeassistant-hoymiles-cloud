@@ -13,7 +13,6 @@ from typing import Any, Dict, Optional
 import aiohttp
 
 from .auth import (
-    AUTH_ERROR_S_MILES_HOME_REQUIRED,
     AuthAttempt,
     choose_preferred_failure,
     summarize_auth_attempts,
@@ -58,6 +57,9 @@ from .const import (
     AUTH_MODE_WEB_V3,
     AUTH_MODE_TO_PROFILE,
     AUTH_PROFILE_DEFAULTS,
+    DEFAULT_HOME_APP_VERSION,
+    HOME_CLIENT_DC,
+    HOME_CLIENT_TID,
     CLIENT_PROFILE_HOME,
     CLIENT_PROFILE_INSTALLER,
     CLIENT_PROFILE_WEB,
@@ -241,6 +243,18 @@ class HoymilesAPI:
         profile_defaults = AUTH_PROFILE_DEFAULTS[client_profile]
         version = self._resolve_app_version(client_profile, app_version=app_version)
         user_agent = profile_defaults["user_agent"]
+
+        # The S-Miles Home (consumer / MS-A2) profile must present the genuine
+        # mobile-app User-Agent "sma/ad/{version}/{tid}/{dc}" — anything else is
+        # rejected with "account can only be used for logging in to the S-Miles
+        # Home app". This is the sole differentiator that passes the gate.
+        if profile_defaults.get("ua_style") == "smiles_app":
+            effective_version = version or DEFAULT_HOME_APP_VERSION
+            tid = profile_defaults.get("tid", HOME_CLIENT_TID)
+            dc = profile_defaults.get("dc", HOME_CLIENT_DC)
+            headers["User-Agent"] = f"{user_agent}/{effective_version}/{tid}/{dc}"
+            return headers
+
         if version:
             headers["User-Agent"] = f"{user_agent}/{version}"
             headers["App-Version"] = version
@@ -780,12 +794,6 @@ class HoymilesAPI:
                 else:
                     attempt = await self._authenticate_v3(client_profile=client_profile)
                 attempts.append(attempt)
-
-                # Once the server reports the account is restricted to the
-                # S-Miles Home app, the remaining profiles hit the same host
-                # and fail identically. Stop early to avoid pointless retries.
-                if not attempt.success and attempt.error_key == AUTH_ERROR_S_MILES_HOME_REQUIRED:
-                    break
 
             self._last_auth_attempts = attempts
             for attempt in attempts:
