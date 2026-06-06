@@ -66,9 +66,23 @@ CLIENT_PROFILE_HOME = "home"
 
 DEFAULT_WEB_USER_AGENT = "HomeAssistant-HoymilesCloud"
 DEFAULT_INSTALLER_USER_AGENT = "S-Miles Installer"
-DEFAULT_HOME_USER_AGENT = "S-Miles Home"
 DEFAULT_INSTALLER_APP_VERSION = "3.7.1"
-DEFAULT_HOME_APP_VERSION = "2.8.0"
+
+# S-Miles Home (consumer / MS-A2 balcony) app identity.
+#
+# These accounts are gated server-side: every endpoint returns "The account can
+# only be used for logging in to the S-Miles Home app" UNLESS the request sends
+# the genuine consumer-app User-Agent. The S-Miles Home Android app builds it as
+# "sma/ad/{app_version}/{tid}/{dc}" (see HttpUtils.n() in com.hm.balcony). The
+# tid identifies the brand/tag (159 = HOYMILES) and matches the "t" field the
+# server returns in the pre-insp response; dc is a data-center hint that starts
+# at 0 (the server returns the real value). Sending this User-Agent against the
+# normal neapi host (it 307-redirects auth to the regional gateway) is enough to
+# pass the gate; data endpoints then work on the standard host. See issue #30.
+DEFAULT_HOME_USER_AGENT_PREFIX = "sma/ad"
+DEFAULT_HOME_APP_VERSION = "2.10.0"
+HOME_CLIENT_TID = 159
+HOME_CLIENT_DC = 0
 
 AUTH_PROFILE_DEFAULTS = {
     CLIENT_PROFILE_WEB: {
@@ -84,16 +98,20 @@ AUTH_PROFILE_DEFAULTS = {
         "base_url": API_BASE_URL,
     },
     CLIENT_PROFILE_HOME: {
-        "user_agent": DEFAULT_HOME_USER_AGENT,
+        # Consumer S-Miles Home app identity (see note above). The User-Agent is
+        # built in a special "sma/ad/{version}/{tid}/{dc}" format rather than the
+        # "{user_agent}/{version}" form used by the other profiles.
+        "user_agent": DEFAULT_HOME_USER_AGENT_PREFIX,
         "app_version": DEFAULT_HOME_APP_VERSION,
-        "x_client_type": "mobile",
-        # TODO: S-Miles Home consumer backend. Consumer "S-Miles Home" /
-        # "S-Miles Enduser" accounts (e.g. MS-A2 balcony storage) live on a
-        # different Hoymiles backend than neapi.hoymiles.com. Once a sanitized
-        # network trace of the S-Miles Home mobile app login is available, set
-        # this to the real host (and adjust headers/request body as needed).
-        # See GitHub issue #30.
-        "base_url": None,
+        "x_client_type": None,
+        "ua_style": "smiles_app",
+        "tid": HOME_CLIENT_TID,
+        "dc": HOME_CLIENT_DC,
+        # Auth must target the EU consumer gateway directly. The default neapi
+        # host 307-redirects auth requests, which invalidates the pre-insp
+        # nonce and makes login fail. Data endpoints still work on the standard
+        # neapi host with the issued token, so only auth is pinned here.
+        "base_url": API_EU_BASE_URL,
     },
 }
 
@@ -107,7 +125,7 @@ AUTH_MODE_OPTIONS = {
     AUTH_MODE_AUTO: "Auto-detect",
     AUTH_MODE_WEB_V3: "S-Miles Cloud Web",
     AUTH_MODE_INSTALLER_V3: "S-Miles Installer",
-    AUTH_MODE_HOME_V3: "S-Miles Home (not yet supported)",
+    AUTH_MODE_HOME_V3: "S-Miles Home (MS-A2 / balcony)",
     AUTH_MODE_LEGACY_V0: "Legacy v0",
 }
 

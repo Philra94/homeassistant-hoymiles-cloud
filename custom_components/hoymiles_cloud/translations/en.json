@@ -28,7 +28,7 @@
       "cannot_connect": "Failed to connect to Hoymiles Cloud",
       "invalid_auth": "Invalid authentication",
       "app_update_required": "Hoymiles rejected the login because the client version is too old",
-      "s_miles_home_required": "This is a consumer S-Miles Home account (typical for MS-A2 balcony storage). It uses a different Hoymiles backend that this integration does not support yet, so changing the authentication mode will not help. See https://github.com/Philra94/homeassistant-hoymiles-cloud/issues/30 if you can help capture the app's login details.",
+      "s_miles_home_required": "This S-Miles Home account could not be authenticated. Make sure you are on the latest version and try the 'S-Miles Home' authentication mode. If it still fails, please report it at https://github.com/Philra94/homeassistant-hoymiles-cloud/issues/30.",
       "no_stations": "No stations found for this account",
       "no_accessible_stations": "Authentication succeeded, but no accessible stations were returned for this account",
       "unknown": "Unexpected error"
@@ -39,7 +39,7 @@
           "auto": "Auto-detect",
           "web_v3": "S-Miles Cloud Web",
           "installer_v3": "S-Miles Installer",
-          "home_v3": "S-Miles Home (not yet supported)",
+          "home_v3": "S-Miles Home (MS-A2 / balcony)",
           "legacy_v0": "Legacy v0"
         }
       }

@@ -344,16 +344,21 @@ def test_installer_profile_headers_include_version_metadata() -> None:
     assert headers["X-Client-Type"] == "mobile"
 
 
-def test_home_profile_headers_include_version_metadata() -> None:
-    """Home-profile requests should include explicit version headers."""
+def test_home_profile_uses_smiles_app_user_agent() -> None:
+    """The S-Miles Home profile must present the genuine consumer-app User-Agent.
+
+    The server gates these accounts unless the request sends
+    ``sma/ad/{version}/{tid}/{dc}`` (tid 159 = HOYMILES). It must NOT send the
+    installer-style App-Version / X-Client-Type headers.
+    """
     api = HoymilesAPI(FakeSession([]), "user@example.com", "secret")
 
-    headers = api._json_headers(client_profile="home", app_version="2.8.0")
+    headers = api._json_headers(client_profile="home", app_version="2.10.0")
 
-    assert headers["User-Agent"] == "S-Miles Home/2.8.0"
-    assert headers["App-Version"] == "2.8.0"
-    assert headers["X-App-Version"] == "2.8.0"
-    assert headers["X-Client-Type"] == "mobile"
+    assert headers["User-Agent"] == "sma/ad/2.10.0/159/0"
+    assert "App-Version" not in headers
+    assert "X-App-Version" not in headers
+    assert "X-Client-Type" not in headers
 
 
 def test_decode_v3_salt_prefers_hex_browser_format() -> None:
@@ -377,8 +382,8 @@ def test_decode_v3_salt_still_accepts_base64() -> None:
 def test_configured_auth_preferences_affect_future_attempts() -> None:
     """Configured auth preferences should affect subsequent authenticate calls.
 
-    The S-Miles Home profile has no built-in backend host, so an explicit
-    ``auth_base_url`` override is supplied to point it at a candidate host.
+    The S-Miles Home profile sends the consumer-app User-Agent; an explicit
+    ``auth_base_url`` override is honored for the request host.
     """
     session = FakeSession(
         [
@@ -389,7 +394,7 @@ def test_configured_auth_preferences_affect_future_attempts() -> None:
     api = HoymilesAPI(session, "user@example.com", "secret")
     api.configure_auth(
         auth_mode="home_v3",
-        app_version="2.8.0",
+        app_version="2.10.0",
         auth_base_url="https://home.example.com",
     )
 
@@ -398,54 +403,39 @@ def test_configured_auth_preferences_affect_future_attempts() -> None:
     assert authenticated is True
     assert api.auth_method == "home_v3:sha256_v3"
     assert api.last_auth_attempt == "home_v3"
-    assert session.requests[0]["kwargs"]["headers"]["User-Agent"] == "S-Miles Home/2.8.0"
+    assert session.requests[0]["kwargs"]["headers"]["User-Agent"] == "sma/ad/2.10.0/159/0"
     # The override host is honored for both pre-insp and login.
     assert session.requests[0]["args"][0] == "https://home.example.com/iam/pub/3/auth/pre-insp"
     assert session.requests[1]["args"][0] == "https://home.example.com/iam/pub/3/auth/login"
 
 
-def test_home_profile_fails_fast_without_backend_host() -> None:
-    """Explicitly selecting S-Miles Home with no backend host should fail fast."""
-    session = FakeSession([])
-    api = HoymilesAPI(session, "user@example.com", "secret")
-    api.configure_auth(auth_mode="home_v3")
+def test_auto_detect_falls_through_to_home_profile_when_gated() -> None:
+    """When web/installer hit the S-Miles Home gate, auto-detect tries home.
 
-    authenticated = asyncio.run(api.authenticate())
-
-    assert authenticated is False
-    assert api.last_auth_error_key == AUTH_ERROR_S_MILES_HOME_REQUIRED
-    # No network request is made when the backend host is unknown.
-    assert session.requests == []
-
-
-def test_auto_detect_skips_home_profile_without_backend_host() -> None:
-    """Auto-detect should not attempt (or mislabel via) the home profile.
-
-    A wrong-password account must surface invalid_auth, not s_miles_home_required.
+    The home profile sends the consumer-app User-Agent, which passes the gate,
+    so auto-detect succeeds via home_v3 instead of failing.
     """
     session = FakeSession(
         [
-            # web_v3
-            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce1"}},
-            {"status": "1", "message": "Invalid credentials"},
-            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce2"}},
-            {"status": "1", "message": "Invalid credentials"},
-            # installer_v3
-            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce3"}},
-            {"status": "1", "message": "Invalid credentials"},
-            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce4"}},
-            {"status": "1", "message": "Invalid credentials"},
-            # legacy_v0
-            {"status": "1", "message": "Log in failed. Please check your account and password."},
+            # web_v3 pre-insp -> account-type gate
+            {"status": "1", "message": "The account can only be used for logging in to the S-Miles Home app."},
+            # installer_v3 pre-insp -> account-type gate
+            {"status": "1", "message": "The account can only be used for logging in to the S-Miles Home app."},
+            # home_v3 pre-insp + login succeed (consumer-app User-Agent passes the gate)
+            {"status": "0", "message": "success", "data": {"a": None, "n": "nonceH"}},
+            {"status": "0", "message": "success", "data": {"token": "token-home"}},
         ]
     )
     api = HoymilesAPI(session, "user@example.com", "secret")
 
     authenticated = asyncio.run(api.authenticate())
 
-    assert authenticated is False
-    assert "home_v3" not in api.last_auth_attempt_summary
-    assert api.last_auth_error_key != AUTH_ERROR_S_MILES_HOME_REQUIRED
+    assert authenticated is True
+    assert api.last_auth_attempt == "home_v3"
+    assert api.auth_method == "home_v3:sha256_v3"
+    # The home pre-insp/login used the consumer-app User-Agent.
+    home_ua = session.requests[-1]["kwargs"]["headers"]["User-Agent"]
+    assert home_ua.startswith("sma/ad/") and home_ua.endswith("/159/0")
 
 
 def test_unsalted_v3_retries_with_sha256_hex_variant() -> None:
@@ -493,17 +483,13 @@ def test_auth_attempt_summary_records_attempted_profiles() -> None:
     """Failed auth runs should keep a readable summary of attempted profiles."""
     session = FakeSession(
         [
-            # web_v3
-            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce1"}},
-            {"status": "1", "message": "Invalid credentials"},
-            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce2"}},
-            {"status": "1", "message": "Your app version is low. Please update to the latest version."},
-            # installer_v3
-            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce3"}},
-            {"status": "1", "message": "Invalid credentials"},
-            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce4"}},
-            {"status": "1", "message": "Invalid credentials"},
-            # legacy_v0
+            # web_v3 pre-insp -> gate
+            {"status": "1", "message": "The account can only be used for logging in to the S-Miles Home app."},
+            # installer_v3 pre-insp -> gate
+            {"status": "1", "message": "The account can only be used for logging in to the S-Miles Home app."},
+            # home_v3 pre-insp -> gate
+            {"status": "1", "message": "The account can only be used for logging in to the S-Miles Home app."},
+            # legacy_v0 login -> failure
             {"status": "1", "message": "Log in failed. Please check your account and password."},
         ]
     )
@@ -512,32 +498,12 @@ def test_auth_attempt_summary_records_attempted_profiles() -> None:
     authenticated = asyncio.run(api.authenticate())
 
     assert authenticated is False
+    # All four profiles are attempted and recorded (auto-detect no longer
+    # short-circuits, so the home profile is always tried).
     assert "web_v3[web]" in api.last_auth_attempt_summary
     assert "installer_v3[installer/3.7.1]" in api.last_auth_attempt_summary
+    assert "home_v3[home/2.10.0]" in api.last_auth_attempt_summary
     assert "legacy_v0[web]" in api.last_auth_attempt_summary
-    # The home profile has no backend host, so auto-detect skips it.
-    assert "home_v3[home/2.8.0]" not in api.last_auth_attempt_summary
-    assert "sha256_hex_v3" in api.last_auth_attempt_summary
-
-
-def test_auto_detect_short_circuits_on_s_miles_home_gate() -> None:
-    """Auto-detect should stop as soon as the S-Miles Home gate is returned."""
-    session = FakeSession(
-        [
-            # web_v3 returns the account-type gate on the first login attempt.
-            {"status": "0", "message": "success", "data": {"a": None, "n": "nonce1"}},
-            {"status": "1", "message": "Can only login to the S-Miles Home."},
-        ]
-    )
-    api = HoymilesAPI(session, "user@example.com", "secret")
-
-    authenticated = asyncio.run(api.authenticate())
-
-    assert authenticated is False
-    assert api.last_auth_error_key == AUTH_ERROR_S_MILES_HOME_REQUIRED
-    # Only web_v3 was attempted; installer/legacy were not tried.
-    assert "installer_v3" not in api.last_auth_attempt_summary
-    assert "legacy_v0" not in api.last_auth_attempt_summary
 
 
 def test_get_station_details_uses_station_find_endpoint() -> None:
