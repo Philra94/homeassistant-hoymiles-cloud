@@ -5,11 +5,11 @@ from datetime import timedelta
 import time
 from typing import Any
 
-import async_timeout
-from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed
+import asyncio
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
@@ -505,7 +505,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def async_update_data():
         """Fetch data from API."""
         try:
-            async with async_timeout.timeout(30):
+            async with asyncio.timeout(30):
                 if api.is_token_expired() and not await api.authenticate():
                     raise ConfigEntryAuthFailed(
                         "Hoymiles authentication failed: "
