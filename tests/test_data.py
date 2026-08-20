@@ -1,4 +1,6 @@
 """Tests for pure Hoymiles data helpers."""
+import pytest
+
 from tests.module_loader import load_integration_module
 
 data_module = load_integration_module("data")
@@ -8,8 +10,10 @@ build_schedule_editor_state = data_module.build_schedule_editor_state
 build_schedule_payload_from_draft = data_module.build_schedule_payload_from_draft
 build_station_capabilities = data_module.build_station_capabilities
 discover_pv_channels = data_module.discover_pv_channels
+find_placeholder_pv_channels = data_module.find_placeholder_pv_channels
 get_allowed_battery_modes = data_module.get_allowed_battery_modes
 get_schedule_modes = data_module.get_schedule_modes
+merge_missing_pv_channel_values = data_module.merge_missing_pv_channel_values
 relay_settings_enabled = data_module.relay_settings_enabled
 validate_schedule_draft = data_module.validate_schedule_draft
 
@@ -227,3 +231,119 @@ def test_relay_settings_enabled_detects_nested_modes() -> None:
     }
 
     assert relay_settings_enabled(relay_settings) is True
+
+
+def test_find_placeholder_pv_channels_flags_all_placeholder_channels() -> None:
+    """Channels whose v/i/p values are all placeholders should be flagged."""
+    pv_indicators = {
+        "list": [
+            {"key": "pv_p_total", "val": "0"},
+            {"key": "1_pv_v", "val": "-"},
+            {"key": "1_pv_i", "val": "-"},
+            {"key": "1_pv_p", "val": "-"},
+        ]
+    }
+
+    assert find_placeholder_pv_channels(pv_indicators) == [1]
+
+
+def test_find_placeholder_pv_channels_ignores_channels_with_real_values() -> None:
+    """A channel with any numeric value must not be flagged."""
+    pv_indicators = {
+        "list": [
+            {"key": "1_pv_v", "val": "42.1"},
+            {"key": "1_pv_i", "val": "-"},
+            {"key": "1_pv_p", "val": "350"},
+        ]
+    }
+
+    assert find_placeholder_pv_channels(pv_indicators) == []
+
+
+def test_merge_replaces_placeholder_channel_values() -> None:
+    """Placeholder v/i/p values should be replaced with module data."""
+    pv_indicators = {
+        "list": [
+            {"key": "pv_p_total", "val": "0"},
+            {"key": "1_pv_v", "val": "-"},
+            {"key": "1_pv_i", "val": "-"},
+            {"key": "1_pv_p", "val": "-"},
+        ]
+    }
+
+    merged = merge_missing_pv_channel_values(
+        pv_indicators,
+        {1: {"MODULE_V": 35.3, "MODULE_I": 3.98, "MODULE_POWER": 140.8}},
+    )
+
+    values = {item["key"]: item["val"] for item in merged["list"]}
+    assert values["1_pv_v"] == 35.3
+    assert values["1_pv_i"] == 3.98
+    assert values["1_pv_p"] == 140.8
+    assert values["pv_p_total"] == 140.8
+
+
+def test_merge_preserves_numeric_indicator_values() -> None:
+    """Numeric indicator values must never be overwritten."""
+    pv_indicators = {
+        "list": [
+            {"key": "1_pv_v", "val": "42.1"},
+            {"key": "1_pv_i", "val": "8.2"},
+            {"key": "1_pv_p", "val": "350"},
+            {"key": "pv_p_total", "val": "1500"},
+        ]
+    }
+
+    merged = merge_missing_pv_channel_values(
+        pv_indicators,
+        {1: {"MODULE_V": 35.3, "MODULE_I": 3.98, "MODULE_POWER": 140.8}},
+    )
+
+    values = {item["key"]: item["val"] for item in merged["list"]}
+    assert values["1_pv_v"] == "42.1"
+    assert values["1_pv_i"] == "8.2"
+    assert values["1_pv_p"] == "350"
+    assert values["pv_p_total"] == "1500"
+
+
+def test_merge_skips_none_module_values() -> None:
+    """A None module value must leave the placeholder untouched."""
+    pv_indicators = {"list": [{"key": "1_pv_v", "val": "-"}]}
+
+    merged = merge_missing_pv_channel_values(pv_indicators, {1: {"MODULE_V": None}})
+
+    assert merged["list"][0]["val"] == "-"
+
+
+def test_merge_does_not_mutate_input() -> None:
+    pv_indicators = {"list": [{"key": "1_pv_v", "val": "-"}]}
+
+    merge_missing_pv_channel_values(pv_indicators, {1: {"MODULE_V": 35.3}})
+
+    assert pv_indicators["list"][0]["val"] == "-"
+
+
+def test_merge_sums_module_power_across_channels() -> None:
+    pv_indicators = {
+        "list": [
+            {"key": "1_pv_p", "val": "-"},
+            {"key": "2_pv_p", "val": "-"},
+            {"key": "pv_p_total", "val": "-"},
+        ]
+    }
+
+    merged = merge_missing_pv_channel_values(
+        pv_indicators,
+        {
+            1: {"MODULE_V": None, "MODULE_I": None, "MODULE_POWER": 140.8},
+            2: {"MODULE_V": None, "MODULE_I": None, "MODULE_POWER": 59.2},
+        },
+    )
+
+    values = {item["key"]: item["val"] for item in merged["list"]}
+    assert values["pv_p_total"] == pytest.approx(200.0)
+
+
+def test_merge_handles_empty_inputs() -> None:
+    assert merge_missing_pv_channel_values(None, {1: {"MODULE_V": 1.0}}) == {}
+    assert merge_missing_pv_channel_values({"list": []}, {}) == {"list": []}

@@ -687,6 +687,106 @@ def discover_pv_channels(pv_indicators: dict[str, Any] | None) -> list[int]:
     return sorted(channels)
 
 
+def _is_placeholder(value: Any) -> bool:
+    """Return whether an indicator value carries no usable number."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        text = value.strip()
+        if text in {"", "-"}:
+            return True
+        try:
+            float(text)
+        except ValueError:
+            return True
+        return False
+    if isinstance(value, (int, float)):
+        return False
+    return True
+
+
+def _is_zero(value: Any) -> bool:
+    """Return whether an indicator value is the number zero."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, str):
+        try:
+            return float(value) == 0
+        except ValueError:
+            return False
+    return False
+
+
+def find_placeholder_pv_channels(pv_indicators: dict[str, Any] | None) -> list[int]:
+    """Return discovered PV channels whose v/i/p values are all placeholders."""
+    channels: list[int] = []
+    for channel in discover_pv_channels(pv_indicators):
+        metrics = [
+            get_pv_indicator_value(pv_indicators, f"{channel}_pv_{metric}")
+            for metric in ("v", "i", "p")
+        ]
+        if all(_is_placeholder(value) for value in metrics):
+            channels.append(channel)
+    return channels
+
+
+def _replace_indicator_value(
+    items: list[dict[str, Any]],
+    key: str,
+    value: float,
+    *,
+    replace_zero: bool = False,
+) -> None:
+    """Set one indicator value in place, replacing placeholders only."""
+    for item in items:
+        if isinstance(item, dict) and item.get("key") == key:
+            if _is_placeholder(item.get("val")) or (
+                replace_zero and _is_zero(item.get("val"))
+            ):
+                item["val"] = value
+            return
+    items.append({"key": key, "val": value})
+
+
+def merge_missing_pv_channel_values(
+    pv_indicators: dict[str, Any] | None,
+    module_values_by_channel: dict[int, dict[str, float | None]],
+) -> dict[str, Any]:
+    """Replace placeholder PV indicator values with per-port module data."""
+    if not pv_indicators or not module_values_by_channel:
+        return pv_indicators or {}
+
+    merged = deepcopy(pv_indicators)
+    items = merged.setdefault("list", [])
+
+    metric_map = {
+        "MODULE_V": "v",
+        "MODULE_I": "i",
+        "MODULE_POWER": "p",
+    }
+
+    module_power_sum = 0.0
+    module_power_known = False
+
+    for channel, module_values in sorted(module_values_by_channel.items()):
+        for module_key, metric in metric_map.items():
+            value = module_values.get(module_key)
+            if value is None:
+                continue
+            _replace_indicator_value(items, f"{channel}_pv_{metric}", value)
+        power = module_values.get("MODULE_POWER")
+        if power is not None:
+            module_power_sum += power
+            module_power_known = True
+
+    if module_power_known:
+        _replace_indicator_value(items, "pv_p_total", module_power_sum, replace_zero=True)
+
+    return merged
+
+
 def get_energy_flow_value(energy_flow: dict[str, Any] | None, key: str) -> float | int | None:
     """Return one energy-flow metric if it exists."""
     if not energy_flow:
