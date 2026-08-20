@@ -99,8 +99,11 @@ behavior because channel↔port mapping would be ambiguous there.
      (`None`, `"-"`, `""`, whitespace, unparseable) and the corresponding
      module value is not `None`, replace it (as float).
    - Numeric indicator values are never overwritten.
-   - If `pv_p_total` is a placeholder and module powers exist, set it to the
-     sum of `MODULE_POWER` across channels.
+   - If `pv_p_total` is a placeholder (non-numeric) **or zero** and at least
+     one module `MODULE_POWER` value is known, set it to the sum of the known
+     module powers. (Rationale: the observed stale value on affected hardware
+     is `"0"`, not `"-"`; a real zero at night is also replaced by a sum of
+     ~0.0, which is a no-op in practice.)
    Returns the (possibly) modified dict; input not mutated.
 
 4. **`__init__.py` (coordinator `async_update_data`)**
