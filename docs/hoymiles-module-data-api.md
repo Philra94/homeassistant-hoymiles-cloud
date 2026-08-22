@@ -51,12 +51,36 @@ each series is the freshest value the cloud has. Decoding is implemented in
 `custom_components/hoymiles_cloud/chart_pb.py` (manual wire-format parsing,
 no protobuf dependency).
 
+## Freshness
+
+The series simply **stops growing** once the inverter goes to sleep — it is not
+padded with zeros. Taking the last element unconditionally would therefore
+repeat the final daylight reading all night and feed phantom energy into any
+Riemann sum built on the PV sensors.
+
+`data.latest_module_values()` resolves the slot label belonging to the newest
+sample against the current time and reports `0.0` for a sample older than
+`MODULE_DATA_MAX_AGE_MINUTES` (15) — zero volts, amps and watts is what a
+sleeping panel actually reports. A slot in the future (clock skew between Home
+Assistant and the cloud) counts as current, and a response without a usable
+`x_axis` keeps its raw sample so hardware variants that omit the labels still
+work.
+
+## Polling cost
+
+The cloud refreshes plant telemetry only every ~5 minutes, so the coordinator
+caches each per-channel response for `MODULE_DATA_CACHE_INTERVAL` (240 s)
+instead of re-fetching it on every poll. This matters because all stations
+share one 30 second update budget (`async_timeout.timeout(30)` in
+`__init__.py`), and each placeholder channel costs one extra request.
+
 ## Notes
 
-- `date` is computed from the Home Assistant host's local time (same
-  convention as `get_energy_flow`). Hosts in a different timezone from the
-  station may briefly request the "wrong" day near midnight; the endpoint
-  then returns an empty series and the integration keeps the previous
-  behavior (placeholder values).
+- `date` and the freshness comparison are anchored to `dt_util.now()`, i.e. the
+  timezone configured in Home Assistant rather than the host clock. Callers
+  outside Home Assistant fall back to `datetime.now()`.
+- Stations whose timezone differs from the Home Assistant one may briefly
+  request the "wrong" day near midnight; the endpoint then returns an empty
+  series and the integration keeps the previous behavior (placeholder values).
 - Related reverse-engineered references: `Eistee82/ioBroker.hoymiles`
   (chart parser), `wil-lem/ha-hoymiles-s-cloud` (per-panel sensors).

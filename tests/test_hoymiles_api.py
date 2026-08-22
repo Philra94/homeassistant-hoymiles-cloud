@@ -679,7 +679,10 @@ def test_get_module_channel_data_returns_last_series_values() -> None:
     api._token = "token"
     api._token_expires_at = 9999999999
 
-    values = asyncio.run(api.get_module_channel_data("15068730", 34762140, 1))
+    now = datetime(2026, 8, 20, 11, 47)
+    values = asyncio.run(
+        api.get_module_channel_data("15068730", 34762140, 1, now=now)
+    )
 
     assert values["MODULE_POWER"] == pytest.approx(140.8, abs=1e-3)
     assert values["MODULE_V"] == pytest.approx(35.3, abs=1e-3)
@@ -687,7 +690,7 @@ def test_get_module_channel_data_returns_last_series_values() -> None:
     request = api._session.requests[0]["kwargs"]
     assert request["json"] == {
         "sid": 15068730,
-        "date": datetime.now().strftime("%Y-%m-%d"),
+        "date": "2026-08-20",
         "mi_list": [{"id": 34762140, "port": 1}],
         "quota": ["MODULE_POWER", "MODULE_V", "MODULE_I"],
     }
@@ -716,6 +719,70 @@ def test_get_module_channel_data_empty_series_keeps_none() -> None:
     api._token = "token"
     api._token_expires_at = 9999999999
 
-    values = asyncio.run(api.get_module_channel_data("15068730", 34762140, 1))
+    values = asyncio.run(
+        api.get_module_channel_data(
+            "15068730", 34762140, 1, now=datetime(2026, 8, 20, 6, 2)
+        )
+    )
 
     assert values == {"MODULE_POWER": None, "MODULE_V": None, "MODULE_I": None}
+
+
+def test_get_module_channel_data_stale_series_reports_zero() -> None:
+    """After sunset the last daylight sample must not be repeated."""
+    api = HoymilesAPI(
+        FakeSession(
+            [
+                encode_line_chart(
+                    ["20:35", "20:40"],
+                    [
+                        ("MODULE_POWER", [40.0, 12.5]),
+                        ("MODULE_V", [30.0, 18.2]),
+                        ("MODULE_I", [1.3, 0.68]),
+                    ],
+                )
+            ]
+        ),
+        "user@example.com",
+        "secret",
+    )
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    values = asyncio.run(
+        api.get_module_channel_data(
+            "15068730", 34762140, 1, now=datetime(2026, 8, 20, 23, 30)
+        )
+    )
+
+    assert values == {"MODULE_POWER": 0.0, "MODULE_V": 0.0, "MODULE_I": 0.0}
+
+
+def test_get_module_channel_data_rounds_float32_noise() -> None:
+    """Raw float32 samples should be rounded to sensible precision."""
+    api = HoymilesAPI(
+        FakeSession(
+            [
+                encode_line_chart(
+                    ["11:45"],
+                    [
+                        ("MODULE_POWER", [140.8499984741211]),
+                        ("MODULE_V", [35.34999847412109]),
+                        ("MODULE_I", [3.9849998950958252]),
+                    ],
+                )
+            ]
+        ),
+        "user@example.com",
+        "secret",
+    )
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    values = asyncio.run(
+        api.get_module_channel_data(
+            "15068730", 34762140, 1, now=datetime(2026, 8, 20, 11, 47)
+        )
+    )
+
+    assert values == {"MODULE_POWER": 140.9, "MODULE_V": 35.3, "MODULE_I": 3.98}

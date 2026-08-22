@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from typing import Any
 
@@ -14,6 +14,8 @@ from .const import (
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_SCHEDULE_MODE_IDS,
     METER_LOCATION_NAMES,
+    MODULE_DATA_MAX_AGE_MINUTES,
+    MODULE_DATA_PRECISION,
 )
 
 
@@ -785,6 +787,87 @@ def merge_missing_pv_channel_values(
         _replace_indicator_value(items, "pv_p_total", module_power_sum, replace_zero=True)
 
     return merged
+
+
+MODULE_DATA_QUOTAS = ("MODULE_POWER", "MODULE_V", "MODULE_I")
+
+
+def _slot_label_to_datetime(label: Any, reference: datetime) -> datetime | None:
+    """Resolve an "HH:MM" chart slot label against the reference day."""
+    if not isinstance(label, str):
+        return None
+    hours, _, minutes = label.strip().partition(":")
+    if not hours.isdigit() or not minutes.isdigit():
+        return None
+    hour = int(hours)
+    minute = int(minutes)
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return reference.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _series_sample_is_fresh(
+    x_axis: list[Any],
+    sample_index: int,
+    reference: datetime,
+    max_age: timedelta,
+) -> bool:
+    """Return whether the newest chart sample still describes the present.
+
+    The chart covers a whole day in five-minute slots and simply stops growing
+    once the inverter goes to sleep, so the last sample stays at the final
+    daylight reading. Without this check the PV sensors would repeat that value
+    all night and feed phantom energy into any Riemann sum built on them.
+
+    When the labels are missing or unparsable the sample is accepted, so
+    hardware families that answer without an ``x_axis`` keep working.
+    """
+    if not x_axis:
+        return True
+    label = x_axis[sample_index] if sample_index < len(x_axis) else x_axis[-1]
+    slot = _slot_label_to_datetime(label, reference)
+    if slot is None:
+        return True
+    if slot > reference:
+        # Clock skew between Home Assistant and the cloud; treat as current.
+        return True
+    return reference - slot <= max_age
+
+
+def latest_module_values(
+    chart: dict[str, Any] | None,
+    *,
+    now: datetime,
+    max_age: timedelta | None = None,
+) -> dict[str, float | None]:
+    """Return the newest per-quota sample from a decoded module day chart.
+
+    A quota is ``None`` when the chart carries no samples for it, and ``0.0``
+    when its newest sample has aged out (see :func:`_series_sample_is_fresh`) --
+    zero volts, amps and watts is what a sleeping panel actually reports.
+    """
+    if max_age is None:
+        max_age = timedelta(minutes=MODULE_DATA_MAX_AGE_MINUTES)
+
+    values: dict[str, float | None] = {quota: None for quota in MODULE_DATA_QUOTAS}
+    if not chart:
+        return values
+
+    x_axis = chart.get("x_axis") or []
+    for series in chart.get("series") or []:
+        if not isinstance(series, dict):
+            continue
+        quota = series.get("type")
+        if quota not in values:
+            continue
+        data = series.get("data") or []
+        if not data:
+            continue
+        if not _series_sample_is_fresh(x_axis, len(data) - 1, now, max_age):
+            values[quota] = 0.0
+            continue
+        values[quota] = round(float(data[-1]), MODULE_DATA_PRECISION.get(quota, 2))
+    return values
 
 
 def get_energy_flow_value(energy_flow: dict[str, Any] | None, key: str) -> float | int | None:

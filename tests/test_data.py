@@ -1,4 +1,6 @@
 """Tests for pure Hoymiles data helpers."""
+from datetime import datetime, timedelta
+
 import pytest
 
 from tests.module_loader import load_integration_module
@@ -13,6 +15,7 @@ discover_pv_channels = data_module.discover_pv_channels
 find_placeholder_pv_channels = data_module.find_placeholder_pv_channels
 get_allowed_battery_modes = data_module.get_allowed_battery_modes
 get_schedule_modes = data_module.get_schedule_modes
+latest_module_values = data_module.latest_module_values
 merge_missing_pv_channel_values = data_module.merge_missing_pv_channel_values
 relay_settings_enabled = data_module.relay_settings_enabled
 validate_schedule_draft = data_module.validate_schedule_draft
@@ -347,3 +350,115 @@ def test_merge_sums_module_power_across_channels() -> None:
 def test_merge_handles_empty_inputs() -> None:
     assert merge_missing_pv_channel_values(None, {1: {"MODULE_V": 1.0}}) == {}
     assert merge_missing_pv_channel_values({"list": []}, {}) == {"list": []}
+
+
+def _chart(x_axis, series):
+    """Build a decoded-chart mapping the way chart_pb returns it."""
+    return {
+        "x_axis": list(x_axis),
+        "series": [{"type": name, "data": list(data)} for name, data in series],
+        "type": "LINE",
+    }
+
+
+def test_latest_module_values_returns_freshest_sample() -> None:
+    """A sample from the current slot is reported as-is."""
+    chart = _chart(
+        ["11:40", "11:45"],
+        [("MODULE_POWER", [100.0, 140.8]), ("MODULE_V", [30.0, 35.3])],
+    )
+
+    values = latest_module_values(chart, now=datetime(2026, 8, 20, 11, 47))
+
+    assert values["MODULE_POWER"] == pytest.approx(140.8)
+    assert values["MODULE_V"] == pytest.approx(35.3)
+    assert values["MODULE_I"] is None
+
+
+def test_latest_module_values_zeroes_stale_samples() -> None:
+    """A series that stopped growing at sunset must report zero, not the peak."""
+    chart = _chart(["20:35", "20:40"], [("MODULE_POWER", [40.0, 12.5])])
+
+    values = latest_module_values(chart, now=datetime(2026, 8, 20, 23, 30))
+
+    assert values["MODULE_POWER"] == 0.0
+
+
+def test_latest_module_values_respects_custom_max_age() -> None:
+    """The freshness window is configurable."""
+    chart = _chart(["11:00"], [("MODULE_POWER", [40.0])])
+    now = datetime(2026, 8, 20, 11, 30)
+
+    assert latest_module_values(chart, now=now, max_age=timedelta(minutes=60))[
+        "MODULE_POWER"
+    ] == pytest.approx(40.0)
+    assert (
+        latest_module_values(chart, now=now, max_age=timedelta(minutes=15))[
+            "MODULE_POWER"
+        ]
+        == 0.0
+    )
+
+
+def test_latest_module_values_accepts_future_slot() -> None:
+    """Clock skew against the cloud must not zero out a live sample."""
+    chart = _chart(["11:45"], [("MODULE_POWER", [140.8])])
+
+    values = latest_module_values(chart, now=datetime(2026, 8, 20, 11, 43))
+
+    assert values["MODULE_POWER"] == pytest.approx(140.8)
+
+
+def test_latest_module_values_without_labels_keeps_sample() -> None:
+    """Hardware answering without an x_axis keeps the previous behaviour."""
+    chart = {"x_axis": [], "series": [{"type": "MODULE_POWER", "data": [140.8]}]}
+
+    values = latest_module_values(chart, now=datetime(2026, 8, 20, 23, 30))
+
+    assert values["MODULE_POWER"] == pytest.approx(140.8)
+
+
+def test_latest_module_values_handles_unparsable_labels() -> None:
+    """Unexpected slot labels must not raise."""
+    chart = _chart(["not-a-time"], [("MODULE_POWER", [140.8])])
+
+    values = latest_module_values(chart, now=datetime(2026, 8, 20, 23, 30))
+
+    assert values["MODULE_POWER"] == pytest.approx(140.8)
+
+
+def test_latest_module_values_uses_series_length_for_labels() -> None:
+    """Freshness follows the series length, not the x_axis length."""
+    chart = _chart(
+        ["06:00", "06:05", "06:10", "06:15"],
+        [("MODULE_POWER", [10.0, 20.0])],
+    )
+
+    values = latest_module_values(chart, now=datetime(2026, 8, 20, 6, 30))
+
+    assert values["MODULE_POWER"] == 0.0
+
+
+def test_latest_module_values_rounds_per_quota() -> None:
+    """Float32 noise is rounded to display precision."""
+    chart = _chart(
+        ["11:45"],
+        [
+            ("MODULE_POWER", [140.8499984741211]),
+            ("MODULE_V", [35.34999847412109]),
+            ("MODULE_I", [3.9849998950958252]),
+        ],
+    )
+
+    values = latest_module_values(chart, now=datetime(2026, 8, 20, 11, 47))
+
+    assert values == {"MODULE_POWER": 140.8, "MODULE_V": 35.3, "MODULE_I": 3.98}
+
+
+def test_latest_module_values_handles_missing_chart() -> None:
+    """A failed decode yields no values rather than raising."""
+    assert latest_module_values(None, now=datetime(2026, 8, 20, 11, 47)) == {
+        "MODULE_POWER": None,
+        "MODULE_V": None,
+        "MODULE_I": None,
+    }

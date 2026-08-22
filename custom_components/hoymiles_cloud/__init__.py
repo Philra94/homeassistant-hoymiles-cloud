@@ -14,6 +14,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
 from .const import (
@@ -30,6 +31,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_STATIC_REFRESH_INTERVAL,
     DOMAIN,
+    MODULE_DATA_CACHE_INTERVAL,
     STORAGE_KEY,
     STORAGE_VERSION,
 )
@@ -424,6 +426,65 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     static_station_cache: dict[str, dict[str, Any]] = {}
     static_station_cache_at: dict[str, float] = {}
+    module_data_cache: dict[tuple[str, int], dict[str, float | None]] = {}
+    module_data_cache_at: dict[tuple[str, int], float] = {}
+    module_data_failures: set[tuple[str, int]] = set()
+
+    async def _async_module_values(
+        station_id: str,
+        mi_id: int,
+        channels: list[int],
+    ) -> dict[int, dict[str, float | None]]:
+        """Return per-channel module chart values, cached across polls.
+
+        The cloud only refreshes plant telemetry every few minutes, so the day
+        chart is re-fetched at most once per MODULE_DATA_CACHE_INTERVAL instead
+        of on every coordinator poll. That keeps the extra requests off the
+        shared 30 second update budget.
+        """
+        def _log_failure(cache_key: tuple[str, int], reason: Any) -> None:
+            """Warn once per outage, then stay at debug.
+
+            This path runs on every poll, so an endpoint that is simply
+            unsupported for the account would otherwise flood the log.
+            """
+            message = "Failed to get module channel data for station %s port %s: %s"
+            if cache_key in module_data_failures:
+                _LOGGER.debug(message, cache_key[0], cache_key[1], reason)
+                return
+            module_data_failures.add(cache_key)
+            _LOGGER.warning(message, cache_key[0], cache_key[1], reason)
+
+        values_by_channel: dict[int, dict[str, float | None]] = {}
+        now = time.monotonic()
+        for channel in channels:
+            cache_key = (station_id, channel)
+            cached = module_data_cache.get(cache_key)
+            if (
+                cached is not None
+                and now - module_data_cache_at.get(cache_key, 0)
+                < MODULE_DATA_CACHE_INTERVAL
+            ):
+                if cached:
+                    values_by_channel[channel] = cached
+                continue
+            try:
+                values = await api.get_module_channel_data(
+                    station_id, mi_id, channel, now=dt_util.now()
+                )
+            except Exception as err:
+                _log_failure(cache_key, err)
+                continue
+            # An undecodable response comes back as an empty mapping. Cache it
+            # too, so a broken endpoint is not re-requested on every poll.
+            module_data_cache[cache_key] = values
+            module_data_cache_at[cache_key] = now
+            if not values:
+                _log_failure(cache_key, "no usable series in response")
+                continue
+            module_data_failures.discard(cache_key)
+            values_by_channel[channel] = values
+        return values_by_channel
 
     async def _async_fetch_static_station_payload(station_id: str) -> dict[str, Any]:
         """Fetch slower-changing station metadata and device inventory."""
@@ -548,22 +609,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         micro = next(iter(microinverters.values()))
                         mi_id = micro.get("id") if isinstance(micro, dict) else None
                         if mi_id is not None:
-                            module_values_by_channel: dict[int, dict[str, Any]] = {}
-                            for channel in placeholder_channels:
-                                try:
-                                    module_values_by_channel[channel] = (
-                                        await api.get_module_channel_data(
-                                            station_id, mi_id, channel
-                                        )
-                                    )
-                                except Exception as err:
-                                    _LOGGER.warning(
-                                        "Failed to get module channel data for "
-                                        "station %s port %s: %s",
-                                        station_id,
-                                        channel,
-                                        err,
-                                    )
+                            module_values_by_channel = await _async_module_values(
+                                station_id, mi_id, placeholder_channels
+                            )
                             if module_values_by_channel:
                                 pv_indicators = merge_missing_pv_channel_values(
                                     pv_indicators, module_values_by_channel

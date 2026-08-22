@@ -43,6 +43,21 @@ API_ENERGY_FLOW_STATS_URL = f"{API_BASE_URL}/pvm-data/api/0/station/data_fd/stat
 API_INDICATORS_URL = f"{API_BASE_URL}/pvm-data/api/0/indicators/data/select_real_indicators_data"
 API_MODULE_DAY_DATA_URL = f"{API_BASE_URL}/pvm-data/api/0/module/data/count_by_day"
 
+# Module (per-port PV) chart fallback tuning.
+# The Hoymiles cloud only refreshes plant telemetry every ~5 minutes, so the
+# day-chart response is cached for slightly less than that instead of being
+# re-fetched on every coordinator poll.
+MODULE_DATA_CACHE_INTERVAL = 240
+# A chart sample older than this is treated as "no longer producing" and
+# reported as 0 rather than being repeated forever after sunset.
+MODULE_DATA_MAX_AGE_MINUTES = 15
+# Decimal places applied to the raw float32 chart samples, per quota.
+MODULE_DATA_PRECISION = {
+    "MODULE_POWER": 1,
+    "MODULE_V": 1,
+    "MODULE_I": 2,
+}
+
 # Battery / relay control endpoints
 API_BATTERY_SETTINGS_READ_URL = f"{API_BASE_URL}/pvm-ctl/api/0/dev/setting/read"
 API_BATTERY_SETTINGS_WRITE_URL = f"{API_BASE_URL}/pvm-ctl/api/0/dev/setting/write"

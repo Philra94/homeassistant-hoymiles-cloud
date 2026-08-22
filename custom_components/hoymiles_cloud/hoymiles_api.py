@@ -75,10 +75,12 @@ from .const import (
 )
 from .data import (
     MODE_KEY_MAPPING,
+    MODULE_DATA_QUOTAS,
     battery_settings_readable,
     build_empty_battery_settings,
     build_empty_relay_settings,
     get_mode_settings,
+    latest_module_values,
     relay_settings_readable,
 )
 from .chart_pb import decode_line_chart
@@ -1170,21 +1172,33 @@ class HoymilesAPI:
         mi_id: int,
         port: int,
         date: str | None = None,
-    ) -> dict[str, Any]:
-        """Return the latest per-port PV module values from the chart endpoint."""
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, float | None]:
+        """Return the latest per-port PV module values from the chart endpoint.
+
+        ``now`` anchors both the requested day and the freshness check. Callers
+        running inside Home Assistant should pass ``dt_util.now()`` so the day
+        boundary follows the configured timezone rather than the host clock.
+        """
+        if now is None:
+            now = datetime.now()
         if date is None:
-            date = datetime.now().strftime("%Y-%m-%d")
+            date = now.strftime("%Y-%m-%d")
         payload = {
             "sid": int(station_id),
             "date": date,
             "mi_list": [{"id": mi_id, "port": port}],
-            "quota": ["MODULE_POWER", "MODULE_V", "MODULE_I"],
+            "quota": list(MODULE_DATA_QUOTAS),
         }
         try:
             raw = await self._post_bytes(API_MODULE_DAY_DATA_URL, payload)
             chart = decode_line_chart(raw)
         except (ValueError, UnicodeDecodeError) as err:
-            _LOGGER.warning(
+            # Logged at debug level: this runs on every coordinator poll, and a
+            # persistently unsupported endpoint would otherwise fill the log.
+            # The coordinator raises the first failure to warning itself.
+            _LOGGER.debug(
                 "Failed to decode module chart data for station %s port %s: %s",
                 station_id,
                 port,
@@ -1192,19 +1206,7 @@ class HoymilesAPI:
             )
             return {}
 
-        values: dict[str, Any] = {
-            "MODULE_POWER": None,
-            "MODULE_V": None,
-            "MODULE_I": None,
-        }
-        for series in chart.get("series", []):
-            series_type = series.get("type")
-            if series_type not in values:
-                continue
-            data = series.get("data") or []
-            if data:
-                values[series_type] = data[-1]
-        return values
+        return latest_module_values(chart, now=now)
 
     async def get_battery_settings(self, station_id: str) -> Dict[str, Any]:
         """Get battery settings for a station."""
