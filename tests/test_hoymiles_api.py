@@ -1,7 +1,11 @@
 """Tests for the Hoymiles API client."""
 import asyncio
+from datetime import datetime
+
+import pytest
 
 from tests.module_loader import load_integration_module
+from tests.pb_wire import encode_line_chart
 
 auth_module = load_integration_module("auth")
 HoymilesAPI = load_integration_module("hoymiles_api").HoymilesAPI
@@ -44,6 +48,35 @@ class FakeRequest:
         return False
 
 
+class FakeBytesResponse:
+    """Minimal aiohttp-like binary response wrapper for tests."""
+
+    def __init__(self, body: bytes):
+        self._body = body
+
+    async def read(self) -> bytes:
+        return self._body
+
+
+class FakeBytesRequest:
+    """Binary counterpart of FakeRequest."""
+
+    def __init__(self, body: bytes):
+        self._response = FakeBytesResponse(body)
+
+    def __await__(self):
+        async def _result():
+            return self._response
+
+        return _result().__await__()
+
+    async def __aenter__(self):
+        return self._response
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class FakeSession:
     """Simple fake session with queued responses."""
 
@@ -55,7 +88,10 @@ class FakeSession:
         if not self._responses:
             raise AssertionError("No fake responses left")
         self.requests.append({"args": args, "kwargs": kwargs})
-        return FakeRequest(self._responses.pop(0))
+        response = self._responses.pop(0)
+        if isinstance(response, bytes):
+            return FakeBytesRequest(response)
+        return FakeRequest(response)
 
 
 def test_get_stations_paginates_all_pages() -> None:
@@ -620,3 +656,66 @@ def test_set_relay_enabled_turns_on_default_nested_mode() -> None:
             },
         },
     }
+
+
+def test_get_module_channel_data_returns_last_series_values() -> None:
+    """Module chart data should expose the freshest value per quota."""
+    api = HoymilesAPI(
+        FakeSession(
+            [
+                encode_line_chart(
+                    ["11:40", "11:45"],
+                    [
+                        ("MODULE_POWER", [100.0, 140.8]),
+                        ("MODULE_V", [30.0, 35.3]),
+                        ("MODULE_I", [3.0, 3.98]),
+                    ],
+                )
+            ]
+        ),
+        "user@example.com",
+        "secret",
+    )
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    values = asyncio.run(api.get_module_channel_data("15068730", 34762140, 1))
+
+    assert values["MODULE_POWER"] == pytest.approx(140.8, abs=1e-3)
+    assert values["MODULE_V"] == pytest.approx(35.3, abs=1e-3)
+    assert values["MODULE_I"] == pytest.approx(3.98, abs=1e-3)
+    request = api._session.requests[0]["kwargs"]
+    assert request["json"] == {
+        "sid": 15068730,
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "mi_list": [{"id": 34762140, "port": 1}],
+        "quota": ["MODULE_POWER", "MODULE_V", "MODULE_I"],
+    }
+
+
+def test_get_module_channel_data_json_error_returns_empty() -> None:
+    """Non-protobuf error bodies should degrade to an empty mapping."""
+    api = HoymilesAPI(
+        FakeSession([b'{"status": "3", "message": "Query error."}']),
+        "user@example.com",
+        "secret",
+    )
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    assert asyncio.run(api.get_module_channel_data("15068730", 34762140, 1)) == {}
+
+
+def test_get_module_channel_data_empty_series_keeps_none() -> None:
+    """Empty series should leave metrics unset."""
+    api = HoymilesAPI(
+        FakeSession([encode_line_chart(["06:00"], [("MODULE_V", [])])]),
+        "user@example.com",
+        "secret",
+    )
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    values = asyncio.run(api.get_module_channel_data("15068730", 34762140, 1))
+
+    assert values == {"MODULE_POWER": None, "MODULE_V": None, "MODULE_I": None}

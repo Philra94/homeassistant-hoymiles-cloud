@@ -39,7 +39,9 @@ from .data import (
     build_schedule_editor_state,
     build_schedule_payload_from_draft,
     build_station_capabilities,
+    find_placeholder_pv_channels,
     get_schedule_draft,
+    merge_missing_pv_channel_values,
     remove_schedule_entry,
     set_schedule_editor_selection,
     update_schedule_editor_draft,
@@ -537,6 +539,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             err,
                         )
                         pv_indicators = {}
+
+                    microinverters = static_payload.get("devices", {}).get(
+                        "microinverters", {}
+                    )
+                    placeholder_channels = find_placeholder_pv_channels(pv_indicators)
+                    if placeholder_channels and len(microinverters) == 1:
+                        micro = next(iter(microinverters.values()))
+                        mi_id = micro.get("id") if isinstance(micro, dict) else None
+                        if mi_id is not None:
+                            module_values_by_channel: dict[int, dict[str, Any]] = {}
+                            for channel in placeholder_channels:
+                                try:
+                                    module_values_by_channel[channel] = (
+                                        await api.get_module_channel_data(
+                                            station_id, mi_id, channel
+                                        )
+                                    )
+                                except Exception as err:
+                                    _LOGGER.warning(
+                                        "Failed to get module channel data for "
+                                        "station %s port %s: %s",
+                                        station_id,
+                                        channel,
+                                        err,
+                                    )
+                            if module_values_by_channel:
+                                pv_indicators = merge_missing_pv_channel_values(
+                                    pv_indicators, module_values_by_channel
+                                )
+                    elif placeholder_channels:
+                        _LOGGER.debug(
+                            "Skipping module data fallback for station %s: "
+                            "%s microinverters",
+                            station_id,
+                            len(microinverters),
+                        )
 
                     if fetch_grid_indicators:
                         try:

@@ -35,6 +35,7 @@ from .const import (
     API_BATTERIES_URL,
     API_METERS_URL,
     API_INDICATORS_URL,
+    API_MODULE_DAY_DATA_URL,
     API_BATTERY_SETTINGS_READ_URL,
     API_BATTERY_SETTINGS_WRITE_URL,
     API_BATTERY_SETTINGS_STATUS_URL,
@@ -80,6 +81,7 @@ from .data import (
     get_mode_settings,
     relay_settings_readable,
 )
+from .chart_pb import decode_line_chart
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -297,6 +299,18 @@ class HoymilesAPI:
         async with self._session.post(url, headers=request_headers, json=payload) as response:
             resp_text = await response.text()
         return json.loads(resp_text)
+
+    async def _post_bytes(
+        self,
+        url: str,
+        payload: dict[str, Any],
+    ) -> bytes:
+        """Send a POST request and return the raw response body."""
+        await self._ensure_authenticated()
+        async with self._session.post(
+            url, headers=self._auth_headers(), json=payload
+        ) as response:
+            return await response.read()
 
     async def _fetch_paged_station_list(
         self,
@@ -1149,6 +1163,48 @@ class HoymilesAPI:
     async def get_pv_indicators(self, station_id: str) -> Dict[str, Any]:
         """Get PV indicators data for a station."""
         return await self.get_indicator_data(station_id, INDICATOR_TYPE_PV)
+
+    async def get_module_channel_data(
+        self,
+        station_id: str,
+        mi_id: int,
+        port: int,
+        date: str | None = None,
+    ) -> dict[str, Any]:
+        """Return the latest per-port PV module values from the chart endpoint."""
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+        payload = {
+            "sid": int(station_id),
+            "date": date,
+            "mi_list": [{"id": mi_id, "port": port}],
+            "quota": ["MODULE_POWER", "MODULE_V", "MODULE_I"],
+        }
+        try:
+            raw = await self._post_bytes(API_MODULE_DAY_DATA_URL, payload)
+            chart = decode_line_chart(raw)
+        except (ValueError, UnicodeDecodeError) as err:
+            _LOGGER.warning(
+                "Failed to decode module chart data for station %s port %s: %s",
+                station_id,
+                port,
+                err,
+            )
+            return {}
+
+        values: dict[str, Any] = {
+            "MODULE_POWER": None,
+            "MODULE_V": None,
+            "MODULE_I": None,
+        }
+        for series in chart.get("series", []):
+            series_type = series.get("type")
+            if series_type not in values:
+                continue
+            data = series.get("data") or []
+            if data:
+                values[series_type] = data[-1]
+        return values
 
     async def get_battery_settings(self, station_id: str) -> Dict[str, Any]:
         """Get battery settings for a station."""
