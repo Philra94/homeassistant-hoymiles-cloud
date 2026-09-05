@@ -28,6 +28,11 @@ except ImportError:  # pragma: no cover - enables pure unit tests without Home A
         return _redact(data)
 
 from .const import CONF_APP_VERSION, CONF_AUTH_MODE, DOMAIN
+from .data import (
+    get_allowed_battery_modes,
+    get_backend_modes,
+    get_supported_modes,
+)
 
 REDACT_KEYS = {
     "address",
@@ -75,6 +80,14 @@ def _station_summary(station_data: dict[str, Any]) -> dict[str, Any]:
             "meters": devices.get("meters", []),
         },
         "setting_rules": station_data.get("setting_rules", {}),
+        "battery_mode_gating": {
+            "backend_modes": get_backend_modes(station_data.get("battery_settings")),
+            "supported_modes": get_supported_modes(station_data.get("battery_settings")),
+            "allowed_modes": get_allowed_battery_modes(
+                station_data.get("battery_settings"),
+                station_data.get("setting_rules"),
+            ),
+        },
         "capabilities": station_data.get("capabilities", {}),
         "battery_settings": _redact_schedule_shapes(station_data.get("battery_settings", {})),
         "relay_settings": _redact_schedule_shapes(station_data.get("relay_settings", {})),
