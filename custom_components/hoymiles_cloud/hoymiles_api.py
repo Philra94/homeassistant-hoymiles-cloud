@@ -1449,8 +1449,28 @@ class HoymilesAPI:
                 "data": deepcopy(mode_settings),
             },
         )
+        _LOGGER.debug(
+            "Direct battery write response for station %s mode %s: %s",
+            station_id,
+            mode,
+            json.dumps(response, default=str),
+        )
+
         if response.get("status") == "0" and response.get("message") == "success":
-            return bool(response.get("data", True))
+            # The endpoint is undocumented and its ``data`` field has been
+            # observed carrying values that are falsy but not a failure (null,
+            # 0, ""). Only an explicit ``False`` means the write was rejected;
+            # anything else alongside a success status is a success. Treating
+            # falsy data as failure made the write look like it silently did
+            # nothing - see issue #43.
+            if response.get("data") is False:
+                _LOGGER.error(
+                    "Direct battery write for station %s mode %s was rejected by the API",
+                    station_id,
+                    mode,
+                )
+                return False
+            return True
 
         _LOGGER.error(
             "Failed direct battery write for station %s mode %s: %s - %s",
@@ -1460,6 +1480,28 @@ class HoymilesAPI:
             response.get("message"),
         )
         return False
+
+    async def apply_battery_mode_payload(
+        self, station_id: str, mode: int, mode_settings: dict[str, Any]
+    ) -> bool:
+        """Write a battery mode payload, falling back to the async job flow.
+
+        Two transports exist. The direct endpoint is fast but undocumented; the
+        action-based flow (write -> job id -> status poll) is the one captured in
+        ``docs/hoymiles-battery-mode-api.md`` and is what the web UI uses. Some
+        accounts stopped accepting the direct write (issue #43), so a failure
+        there is retried through the documented flow before giving up.
+        """
+        if await self.set_battery_config_direct(station_id, mode, mode_settings):
+            return True
+
+        _LOGGER.debug(
+            "Direct battery write failed for station %s mode %s, "
+            "retrying via the async settings job flow",
+            station_id,
+            mode,
+        )
+        return await self._write_battery_mode_payload(station_id, mode, mode_settings)
 
     async def _write_battery_mode_payload(
         self, station_id: str, mode: int, mode_settings: dict[str, Any]
@@ -1617,7 +1659,7 @@ class HoymilesAPI:
             mode_settings.setdefault("money_code", "$")
             mode_settings.setdefault("date", [])
 
-        return await self.set_battery_config_direct(station_id, mode, mode_settings)
+        return await self.apply_battery_mode_payload(station_id, mode, mode_settings)
 
     async def set_battery_mode(self, station_id: str, mode: int) -> bool:
         """Set battery mode for a station."""
@@ -1634,7 +1676,7 @@ class HoymilesAPI:
             BATTERY_MODES.get(mode),
             station_id,
         )
-        return await self.set_battery_config_direct(station_id, mode, mode_settings)
+        return await self.apply_battery_mode_payload(station_id, mode, mode_settings)
 
     async def set_reserve_soc(self, station_id: str, reserve_soc: int) -> bool:
         """Set battery reserve SOC for a station."""
