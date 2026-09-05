@@ -11,6 +11,7 @@ from homeassistant.const import CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -375,8 +376,81 @@ async def _async_unregister_services(hass: HomeAssistant) -> None:
     hass.data.get(DOMAIN, {}).pop("services_registered", None)
 
 
+# Reserve-SOC entities were originally keyed by a slugified mode name and are
+# now keyed by the numeric mode id. Without a migration Home Assistant keeps the
+# old entry registered and gives the new entity a "_2" suffix, leaving users
+# with a dead duplicate and silently broken automations - see issue #43.
+LEGACY_RESERVE_SOC_MODE_SLUGS = {
+    "self-consumption_mode": 1,
+    "economy_mode": 2,
+    "backup_mode": 3,
+    "off-grid_mode": 4,
+    "self-consumption_+_max_power_mode": 5,
+    "backup_+_max_power_mode": 6,
+    "peak_shaving_mode": 7,
+    "time_of_use_mode": 8,
+}
+
+
+def _legacy_reserve_soc_mode(unique_id: str) -> int | None:
+    """Return the mode id a legacy slug-keyed reserve SOC unique id refers to."""
+    marker = "_battery_reserve_soc_"
+    if marker not in unique_id:
+        return None
+    _, _, suffix = unique_id.rpartition(marker)
+    return LEGACY_RESERVE_SOC_MODE_SLUGS.get(suffix)
+
+
+async def _async_migrate_reserve_soc_entities(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Retire legacy slug-keyed reserve SOC entities.
+
+    Two situations exist. If the modern mode-id entity was never created the
+    legacy entry is renamed onto the new unique id, keeping the user's history
+    and automations. If both exist - the common case, because the rename shipped
+    without a migration and Home Assistant then suffixed the new entity with
+    "_2" - the legacy entry is a dead duplicate and is removed.
+    """
+    registry = er.async_get(hass)
+    entries = er.async_entries_for_config_entry(registry, entry.entry_id)
+    known_unique_ids = {item.unique_id for item in entries}
+
+    for item in entries:
+        if item.domain != "number" or not item.unique_id:
+            continue
+        mode = _legacy_reserve_soc_mode(item.unique_id)
+        if mode is None:
+            continue
+
+        marker = "_battery_reserve_soc_"
+        prefix, _, _ = item.unique_id.rpartition(marker)
+        new_unique_id = f"{prefix}{marker}{mode}"
+
+        if new_unique_id in known_unique_ids:
+            _LOGGER.info(
+                "Removing superseded reserve SOC entity %s (unique id %s); "
+                "it was replaced by the mode-id keyed entity",
+                item.entity_id,
+                item.unique_id,
+            )
+            registry.async_remove(item.entity_id)
+            continue
+
+        _LOGGER.info(
+            "Migrating reserve SOC entity %s from unique id %s to %s",
+            item.entity_id,
+            item.unique_id,
+            new_unique_id,
+        )
+        registry.async_update_entity(item.entity_id, new_unique_id=new_unique_id)
+        known_unique_ids.add(new_unique_id)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Hoymiles Cloud from a config entry."""
+    await _async_migrate_reserve_soc_entities(hass, entry)
+
     username = entry.data[CONF_USERNAME]
     password = entry.data[CONF_PASSWORD]
     scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)

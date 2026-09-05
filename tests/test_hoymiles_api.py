@@ -786,3 +786,97 @@ def test_get_module_channel_data_rounds_float32_noise() -> None:
     )
 
     assert values == {"MODULE_POWER": 140.9, "MODULE_V": 35.3, "MODULE_I": 3.98}
+
+
+def _read_battery_settings_responses(mode: int, mode_key: str) -> list[dict]:
+    """Return the two responses of a battery-settings read job."""
+    return [
+        {"status": "0", "message": "success", "data": "read-job"},
+        {
+            "status": "0",
+            "message": "success",
+            "data": {
+                "code": 0,
+                "data": {"mode": mode, "data": {mode_key: {"reserve_soc": 10}}},
+            },
+        },
+    ]
+
+
+@pytest.mark.parametrize("falsy_data", [None, 0, "", {}, []])
+def test_direct_battery_write_accepts_success_with_falsy_data(falsy_data) -> None:
+    """A success status must not be read as failure because ``data`` is falsy.
+
+    The direct endpoint is undocumented and has been observed returning success
+    with an empty ``data`` field; treating that as a failure made writes look
+    like they silently did nothing (issue #43).
+    """
+    session = FakeSession(
+        _read_battery_settings_responses(1, "k_1")
+        + [{"status": "0", "message": "success", "data": falsy_data}]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    assert asyncio.run(api.set_battery_mode("123", 1)) is True
+    # The documented async fallback must not fire when the direct write worked.
+    assert len(session.requests) == 3
+
+
+def test_direct_battery_write_rejects_explicit_false_and_falls_back() -> None:
+    """``data: False`` is a real rejection, which then triggers the fallback."""
+    session = FakeSession(
+        _read_battery_settings_responses(1, "k_1")
+        + [
+            {"status": "0", "message": "success", "data": False},
+            # fallback: async write job, then its status poll
+            {"status": "0", "message": "success", "data": "write-job"},
+            {"status": "0", "message": "success", "data": {"code": 0}},
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    assert asyncio.run(api.set_battery_mode("123", 1)) is True
+    assert len(session.requests) == 5
+
+
+def test_battery_write_falls_back_to_async_job_flow() -> None:
+    """A failing direct write is retried through the documented job flow."""
+    session = FakeSession(
+        _read_battery_settings_responses(1, "k_1")
+        + [
+            {"status": "1", "message": "failed", "data": None},
+            {"status": "0", "message": "success", "data": "write-job"},
+            {"status": "0", "message": "success", "data": {"code": 0}},
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    assert asyncio.run(api.set_battery_mode("123", 1)) is True
+
+    # The fallback must use the documented action-1013 payload shape.
+    fallback_payload = session.requests[3]["kwargs"]["json"]
+    assert fallback_payload["action"] == 1013
+    assert fallback_payload["data"]["sid"] == 123
+    assert fallback_payload["data"]["data"]["mode"] == 1
+
+
+def test_battery_write_reports_failure_when_both_transports_fail() -> None:
+    """Both transports failing must still surface as a failed write."""
+    session = FakeSession(
+        _read_battery_settings_responses(1, "k_1")
+        + [
+            {"status": "1", "message": "failed", "data": None},
+            {"status": "1", "message": "failed", "data": None},
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    assert asyncio.run(api.set_battery_mode("123", 1)) is False

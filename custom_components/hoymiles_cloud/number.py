@@ -7,6 +7,7 @@ from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
@@ -287,7 +288,10 @@ class HoymilesBatteryReserveSOC(HoymilesBatteryNumberEntity):
             self._mode,
             {"reserve_soc": int(value)},
         ):
-            return
+            raise HomeAssistantError(
+                f"Hoymiles rejected the reserve SOC update for {self._mode_name}. "
+                "See the Home Assistant log for the API response."
+            )
 
         await self._update_soc(self._station_id, self._get_storage_key(), int(value))
         await self.coordinator.async_request_refresh()
@@ -330,7 +334,10 @@ class HoymilesBatteryMaxPower(HoymilesBatteryNumberEntity):
             self._mode,
             {"max_power": float(value)},
         ):
-            return
+            raise HomeAssistantError(
+                f"Hoymiles rejected the max power update for {self._mode_name}. "
+                "See the Home Assistant log for the API response."
+            )
 
         await self.coordinator.async_request_refresh()
         self.async_write_ha_state()
@@ -375,7 +382,10 @@ class HoymilesPeakShavingMaxSOC(HoymilesBatteryNumberEntity):
             max_soc=int(value),
             meter_power=current_settings.get("meter_power"),
         ):
-            return
+            raise HomeAssistantError(
+                "Hoymiles rejected the Peak Shaving max SOC update. "
+                "See the Home Assistant log for the API response."
+            )
 
         await self.coordinator.async_request_refresh()
         self.async_write_ha_state()
@@ -420,7 +430,10 @@ class HoymilesPeakShavingMeterPower(HoymilesBatteryNumberEntity):
             max_soc=current_settings.get("max_soc"),
             meter_power=int(value),
         ):
-            return
+            raise HomeAssistantError(
+                "Hoymiles rejected the Peak Shaving meter power update. "
+                "See the Home Assistant log for the API response."
+            )
 
         await self.coordinator.async_request_refresh()
         self.async_write_ha_state()

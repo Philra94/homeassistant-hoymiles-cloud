@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta
 import json
+import logging
 from typing import Any
 
 from .const import (
@@ -19,6 +20,8 @@ from .const import (
     MODULE_DATA_PRECISION,
 )
 
+
+_LOGGER = logging.getLogger(__name__)
 
 MODE_KEY_MAPPING = {
     1: "k_1",
@@ -617,6 +620,16 @@ def get_allowed_battery_modes(
         if isinstance(mode, (int, float, str)) and str(mode).strip().isdigit()
     }
     allowed = [mode for mode in supported_modes if mode in restricted_modes]
+    if allowed and len(allowed) != len(supported_modes):
+        # ctl_mode_set semantics are not fully verified (see the open questions
+        # in docs/hoymiles-battery-mode-api.md). Record what it removes so a
+        # user reporting a missing control can be diagnosed - see issue #43.
+        _LOGGER.debug(
+            "ctl_mode_set %s hid battery modes %s from the supported set %s",
+            sorted(restricted_modes),
+            [mode for mode in supported_modes if mode not in restricted_modes],
+            supported_modes,
+        )
     return allowed or supported_modes
 
 
