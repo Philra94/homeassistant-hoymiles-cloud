@@ -23,7 +23,7 @@ Sensitive values such as cookies and bearer tokens are intentionally omitted fro
   - `4` Off-Grid Mode
   - `7` Peak Shaving Mode
   - `8` Time of Use Mode
-- The read response also contains backend payload buckets `k_5` and `k_6`, which were not exposed as visible modes in this plant's current web UI.
+- The read response also contains backend payload buckets `k_5` and `k_6`, which were not exposed as visible modes in *this* plant's web UI. They are now identified as **Force Charge (`5`)** and **Force Discharge (`6`)**, confirmed against another station in GitHub issue `#34`, where both buckets carry `reserve_soc` and `max_power` and are selectable in that account's UI. Availability is model- and firmware-dependent, so they must stay gated on the account's own `k_*` payload.
 - `Time of Use Mode` still carries a default schedule block in the outgoing payload with `03:00-05:00`, matching the previously reported behavior in GitHub issue `#18`.
 
 ## UI To Backend Mode Mapping
@@ -34,6 +34,8 @@ Sensitive values such as cookies and bearer tokens are intentionally omitted fro
 | Economy Mode | `2` | `{"mode":2,"data":{"reserve_soc":10,"money_code":"$","date":[...]}}` |
 | Backup Mode | `3` | `{"mode":3,"data":{"reserve_soc":100}}` |
 | Off-Grid Mode | `4` | `{"mode":4}` |
+| Force Charge Mode | `5` | `{"mode":5,"data":{"reserve_soc":100,"max_power":65.0}}` |
+| Force Discharge Mode | `6` | `{"mode":6,"data":{"reserve_soc":30,"max_power":50.0}}` |
 | Peak Shaving Mode | `7` | `{"mode":7,"data":{"reserve_soc":35,"max_soc":70,"meter_power":11000}}` |
 | Time of Use Mode | `8` | `{"mode":8,"data":{"reserve_soc":10,"time":[...]}}` |
 
@@ -328,7 +330,7 @@ Notes:
 - `data.mode` is the currently active backend mode.
 - `data.data.k_<n>` stores the persisted configuration block for each backend mode.
 - `k_1`, `k_2`, `k_3`, `k_4`, `k_7`, and `k_8` map cleanly to the six visible UI modes observed in this session.
-- `k_5` and `k_6` were returned by the backend but were not exposed as visible modes in this plant's battery settings UI.
+- `k_5` and `k_6` are Force Charge and Force Discharge. They were returned by the backend but not exposed in this plant's battery settings UI; on stations that do expose them they carry `reserve_soc` and `max_power` (see issue `#34`).
 
 ## Observed Write Endpoint
 
@@ -726,10 +728,10 @@ Used by `dev/setting/read`.
 - The integration should avoid assuming only one schedule-capable mode exists:
   - `mode 2` uses an electricity-rate and weekday/date schedule structure
   - `mode 8` uses a direct charge/discharge time block structure
-- Hidden backend payload buckets `k_5` and `k_6` suggest there may be additional model-dependent modes or capabilities not visible in every plant UI.
+- Backend payload buckets `k_5` and `k_6` are Force Charge and Force Discharge; they are model- and firmware-dependent and are not visible in every plant UI, which is why mode availability must always be derived from the account's own payload rather than hardcoded.
 
 ## Open Questions
 
-- What exact semantics do backend payload buckets `k_5` and `k_6` represent?
+- Is there a backend mode `9` ("AI Mode"), reported by a certified tester as upcoming in issue `#34`? Not yet observed in any captured payload.
 - Are `mode 2` and `mode 8` both intended to remain user-visible long-term, or is one a legacy/region-specific presentation of the other?
 - Which fields in `station/setting_rule` and `sar_g_c` should be used to gate entity creation in Home Assistant?

@@ -12,10 +12,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
 from .const import (
-    BATTERY_MODE_BACKUP_MAX_POWER,
     BATTERY_MODE_ECONOMY,
+    BATTERY_MODE_FORCE_CHARGE,
+    BATTERY_MODE_FORCE_DISCHARGE,
     BATTERY_MODE_PEAK_SHAVING,
-    BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER,
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_MODES,
     DOMAIN,
@@ -72,7 +72,7 @@ async def async_setup_entry(
                         update_soc_callback=update_soc,
                     )
                 )
-            if mode in (BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER, BATTERY_MODE_BACKUP_MAX_POWER) and "max_power" in mode_settings:
+            if mode in (BATTERY_MODE_FORCE_CHARGE, BATTERY_MODE_FORCE_DISCHARGE) and "max_power" in mode_settings:
                 entities.append(
                     HoymilesBatteryMaxPower(
                         coordinator=coordinator,
@@ -295,7 +295,7 @@ class HoymilesBatteryReserveSOC(HoymilesBatteryNumberEntity):
 
 
 class HoymilesBatteryMaxPower(HoymilesBatteryNumberEntity):
-    """Entity for controlling mode 5/6 max_power."""
+    """Entity for controlling max_power of Force Charge (5) / Force Discharge (6)."""
 
     def __init__(
         self,

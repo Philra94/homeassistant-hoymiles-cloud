@@ -46,10 +46,10 @@ from .const import (
     BATTERY_MODE_ECONOMY,
     BATTERY_MODE_IDS,
     BATTERY_MODE_SELF_CONSUMPTION,
-    BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER,
+    BATTERY_MODE_FORCE_CHARGE,
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_MODE_BACKUP,
-    BATTERY_MODE_BACKUP_MAX_POWER,
+    BATTERY_MODE_FORCE_DISCHARGE,
     BATTERY_MODES,
     AUTH_MODE_AUTO,
     AUTH_MODE_HOME_V3,
@@ -93,8 +93,8 @@ DEFAULT_MODE_SETTINGS: dict[int, dict[str, Any]] = {
     BATTERY_MODE_ECONOMY: {"reserve_soc": 10, "money_code": "$", "date": []},
     BATTERY_MODE_BACKUP: {"reserve_soc": 100},
     4: {},
-    BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER: {"reserve_soc": 70, "max_power": 50.0},
-    BATTERY_MODE_BACKUP_MAX_POWER: {"reserve_soc": 30, "max_power": 50.0},
+    BATTERY_MODE_FORCE_CHARGE: {"reserve_soc": 70, "max_power": 50.0},
+    BATTERY_MODE_FORCE_DISCHARGE: {"reserve_soc": 30, "max_power": 50.0},
     7: {"reserve_soc": 30, "max_soc": 70, "meter_power": 3000},
     BATTERY_MODE_TIME_OF_USE: {"reserve_soc": 10},
 }
@@ -1071,7 +1071,14 @@ class HoymilesAPI:
                     _LOGGER.debug("Raw microinverters data: %s", microinverters_data)
                     
                     if not microinverters_data:
-                        _LOGGER.warning("API returned success but microinverters list is empty")
+                        # Battery-only stations (e.g. HiBattery, MS-A2) legitimately have
+                        # no microinverters. This runs on every coordinator poll, so it
+                        # must not warn - see issue #47.
+                        _LOGGER.debug(
+                            "No microinverters returned for station %s "
+                            "(normal for battery-only systems)",
+                            station_id,
+                        )
                         
                     for microinverter in microinverters_data:
                         microinverter_id = str(microinverter.get("id"))
