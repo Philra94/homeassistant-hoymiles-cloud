@@ -6,7 +6,7 @@ This custom integration for Home Assistant allows you to monitor and control you
 
 - **Data Monitoring:**
   - Solar PV power generation
-  - Battery power (charge/discharge)
+  - Battery power (signed: positive = discharging, negative = charging)
   - Battery state of charge
   - Grid power import/export
   - Load power consumption
@@ -21,6 +21,25 @@ This custom integration for Home Assistant allows you to monitor and control you
   - Peak Shaving Mode specific settings (`max_soc`, `meter_power`) when supported
   - Home Assistant-native draft editors for Economy and Time of Use schedules using built-in selects, text fields, numbers, buttons, and summary sensors
   - Advanced battery mode payload updates through Home Assistant services for Economy and Time of Use schedules
+
+## Breaking change in 1.2.0: battery power sign convention
+
+The Hoymiles API always reports `bms_power` as a positive magnitude, so the
+`battery_power` sensor previously read positive while charging *and* while
+discharging, and the `battery_charging` binary sensor was stuck on. Since
+version 1.2.0 the sign and the flow direction are taken from the `flows` array
+of the live indicators payload:
+
+- **positive `battery_power` = discharging** (battery feeds the house/grid)
+- **negative `battery_power` = charging** (battery is the flow target)
+- `battery_flow_direction` and `battery_charging` follow the same source and
+  report `unknown` while the battery is idle (no battery entry in `flows`)
+
+**Upgrading:** existing installs will see `battery_power` flip sign while
+charging. Dashboards, templates, automations and long-term statistics that were
+written against the old always-positive value need to be reviewed, and existing
+statistics for that entity mix both conventions. Accounts whose firmware does
+not return a `flows` array keep the previous behaviour.
 
 ## Development Status
 
