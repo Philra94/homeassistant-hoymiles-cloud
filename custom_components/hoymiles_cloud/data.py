@@ -807,6 +807,36 @@ def merge_missing_pv_channel_values(
     return merged
 
 
+def iter_module_data_targets(
+    microinverters: dict[str, Any] | None,
+    placeholder_channels: list[int] | None,
+) -> list[tuple[int, list[int]]]:
+    """Return the (microinverter id, channels) pairs for the PV fallback.
+
+    The per-port module-data fallback used to run only when a station had
+    exactly one microinverter, which silently skipped every multi-micro (and
+    every micro-less) station. Ordering is stable so a request budget spent
+    across polls always resumes at the same place.
+    """
+    if not microinverters or not placeholder_channels:
+        return []
+
+    ids: list[int] = []
+    for micro in microinverters.values():
+        if not isinstance(micro, dict):
+            continue
+        raw_id = micro.get("id")
+        try:
+            mi_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if mi_id not in ids:
+            ids.append(mi_id)
+
+    channels = sorted(set(placeholder_channels))
+    return [(mi_id, list(channels)) for mi_id in sorted(ids)]
+
+
 MODULE_DATA_QUOTAS = ("MODULE_POWER", "MODULE_V", "MODULE_I")
 
 
