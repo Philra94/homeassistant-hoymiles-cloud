@@ -48,6 +48,11 @@ API_MODULE_DAY_DATA_URL = f"{API_BASE_URL}/pvm-data/api/0/module/data/count_by_d
 # day-chart response is cached for slightly less than that instead of being
 # re-fetched on every coordinator poll.
 MODULE_DATA_CACHE_INTERVAL = 240
+# Upper bound on live module-chart requests issued during a single coordinator
+# refresh. A station with many microinverters would otherwise turn one poll
+# into a burst of requests; anything above the budget is picked up by later
+# polls, and cached results make each poll pick up where the last stopped.
+MODULE_DATA_MAX_FETCHES_PER_REFRESH = 8
 # A chart sample older than this is treated as "no longer producing" and
 # reported as 0 rather than being repeated forever after sunset.
 MODULE_DATA_MAX_AGE_MINUTES = 15

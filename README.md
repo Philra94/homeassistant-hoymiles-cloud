@@ -137,6 +137,17 @@ For structured battery settings and automation-friendly editor flows, the integr
 
 `set_battery_mode_settings` accepts a raw settings dictionary and merges it into the live Hoymiles mode payload by default. This is the recommended path for advanced Economy (`mode: 2`) and Time of Use (`mode: 8`) schedule updates because the backend expects the full mode payload to be preserved.
 
+### Diagnostics
+
+If devices or entities are missing, download the diagnostics from the integration entry
+(**Settings → Devices & Services → Hoymiles Cloud → ⋮ → Download diagnostics**) and attach
+them to your issue. The export lists every discovered device family — including
+microinverters, which are fetched from a different endpoint than string/hybrid inverters —
+the raw indicator/telemetry payloads behind the PV, grid and load entities, and a
+`device_fetch_status` block showing whether each device endpoint returned an empty list or
+was rejected by the account (e.g. `No Permission`). Serial numbers, addresses, coordinates
+and account identifiers are redacted before the file is written.
+
 ## Notes
 
 - The integration uses the modern Hoymiles v3 authentication flow with the observed browser-compatible hashing fallback.
@@ -145,7 +156,7 @@ For structured battery settings and automation-friendly editor flows, the integr
 - Economy and Time-of-Use schedules now have draft editor entities in Home Assistant, but the integration still writes the full structured Hoymiles payload on apply.
 - Validation is intentionally conservative for schedule editing: time/date formats and basic numeric ranges are checked before writes, while ambiguous Hoymiles-specific semantics are kept internal.
 - API endpoints and payload structures are based on observed Hoymiles Cloud behavior and may still vary by region, account role, and hardware family.
-- On some hardware (observed: HF-800-1WB) the indicators endpoint returns placeholder values for per-channel PV data; the integration then falls back to the module-data chart endpoint (see `docs/hoymiles-module-data-api.md`) for single-microinverter stations. Those values are cached for a few minutes to match the cloud's own refresh rate, and drop to `0` once the inverter stops reporting for the day rather than repeating the last daylight reading.
+- On some hardware (observed: HF-800-1WB) the indicators endpoint returns placeholder values for per-channel PV data; the integration then falls back to the module-data chart endpoint (see `docs/hoymiles-module-data-api.md`). Stations with several microinverters are covered too; the extra chart requests are budgeted per refresh, so a large plant fills in its ports over a few polls instead of all at once. Those values are cached for a few minutes to match the cloud's own refresh rate, and drop to `0` once the inverter stops reporting for the day rather than repeating the last daylight reading.
 
 ## Contributing
 
