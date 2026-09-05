@@ -19,6 +19,7 @@ This custom integration for Home Assistant allows you to monitor and control you
   - Set battery operation mode when the account exposes writable battery settings
   - Configure battery reserve state of charge for the modes returned by the account
   - Peak Shaving Mode specific settings (`max_soc`, `meter_power`) when supported
+  - Force Charge and Force Discharge modes, including their `max_power` limit, on stations whose account exposes them
   - Home Assistant-native draft editors for Economy and Time of Use schedules using built-in selects, text fields, numbers, buttons, and summary sensors
   - Advanced battery mode payload updates through Home Assistant services for Economy and Time of Use schedules
 

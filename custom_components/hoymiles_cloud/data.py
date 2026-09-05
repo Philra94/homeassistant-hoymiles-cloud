@@ -8,9 +8,9 @@ from typing import Any
 
 from .const import (
     BATTERY_MODE_ECONOMY,
-    BATTERY_MODE_BACKUP_MAX_POWER,
+    BATTERY_MODE_FORCE_CHARGE,
+    BATTERY_MODE_FORCE_DISCHARGE,
     BATTERY_MODE_IDS,
-    BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER,
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_SCHEDULE_MODE_IDS,
     INDICATOR_FLOW_STAT_TYPE_BATTERY,
@@ -1037,6 +1037,6 @@ def build_station_capabilities(
         "backend_battery_modes": get_backend_modes(battery_settings),
         "battery_schedule_modes": [mode for mode in allowed_modes if mode_supports_schedule(mode)],
         "restricted_mode_set": restricted_mode_set if isinstance(restricted_mode_set, list) else [],
-        "supports_mode_5": BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER in get_backend_modes(battery_settings),
-        "supports_mode_6": BATTERY_MODE_BACKUP_MAX_POWER in get_backend_modes(battery_settings),
+        "supports_mode_5": BATTERY_MODE_FORCE_CHARGE in get_backend_modes(battery_settings),
+        "supports_mode_6": BATTERY_MODE_FORCE_DISCHARGE in get_backend_modes(battery_settings),
     }
