@@ -13,6 +13,7 @@ from .const import (
     BATTERY_MODE_SELF_CONSUMPTION_MAX_POWER,
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_SCHEDULE_MODE_IDS,
+    INDICATOR_FLOW_STAT_TYPE_BATTERY,
     METER_LOCATION_NAMES,
     MODULE_DATA_MAX_AGE_MINUTES,
     MODULE_DATA_PRECISION,
@@ -29,6 +30,10 @@ MODE_KEY_MAPPING = {
     7: "k_7",
     8: "k_8",
 }
+
+# Sign applied to the battery power magnitude reported by the API.
+BATTERY_FLOW_DISCHARGING = 1
+BATTERY_FLOW_CHARGING = -1
 
 ECONOMY_DURATION_TYPES = (1, 2, 3)
 DEFAULT_WEEK_GROUPS = (
@@ -875,6 +880,91 @@ def get_energy_flow_value(energy_flow: dict[str, Any] | None, key: str) -> float
     if not energy_flow:
         return None
     return energy_flow.get(key)
+
+
+def _reflux_data(station_data: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the live reflux payload of a station."""
+    return (station_data or {}).get("real_time_data", {}).get("reflux_station_data", {})
+
+
+def _optional_float(value: Any) -> float | None:
+    """Coerce a value to float, returning None for missing/placeholder values."""
+    if value is None or value in ("", "-"):
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def get_battery_flows(station_data: dict[str, Any] | None) -> list[Any] | None:
+    """Return the live ``flows`` array, or None when the payload has none.
+
+    A missing or malformed array means the account/firmware does not report
+    flows at all, which callers use to decide whether a legacy fallback is
+    allowed.
+    """
+    flows = _reflux_data(station_data).get("flows")
+    if not isinstance(flows, list):
+        return None
+    return flows
+
+
+def get_battery_flow_direction(station_data: dict[str, Any] | None) -> int | None:
+    """Return 1 for discharging, -1 for charging, None if unknown.
+
+    Each entry of the API ``flows`` array links a source (``out``) to a target
+    (``in``) node. ``out: 10`` means the battery is the source (discharging);
+    ``in: 10`` means it is the target (charging). An idle battery has no flow
+    entry at all, which yields None.
+    """
+    flows = get_battery_flows(station_data)
+    if flows is None:
+        return None
+    for flow in flows:
+        if not isinstance(flow, dict):
+            continue
+        if flow.get("out") == INDICATOR_FLOW_STAT_TYPE_BATTERY:
+            return BATTERY_FLOW_DISCHARGING
+        if flow.get("in") == INDICATOR_FLOW_STAT_TYPE_BATTERY:
+            return BATTERY_FLOW_CHARGING
+    return None
+
+
+def get_signed_battery_power(station_data: dict[str, Any] | None) -> float | None:
+    """Return signed battery power: positive = discharging, negative = charging.
+
+    The API always reports ``bms_power`` as a positive magnitude, so the sign is
+    taken from the live flow direction. Without a battery flow entry the battery
+    is idle (magnitude ~0) or the account does not report flows at all; in both
+    cases the unsigned magnitude is returned.
+    """
+    raw = _optional_float(_reflux_data(station_data).get("bms_power"))
+    if raw is None:
+        return None
+    direction = get_battery_flow_direction(station_data)
+    if direction is None:
+        return raw
+    return round(raw * direction, 2)
+
+
+def is_battery_charging(station_data: dict[str, Any] | None) -> bool | None:
+    """Return whether the battery is charging, or None when unknown."""
+    direction = get_battery_flow_direction(station_data)
+    if direction is not None:
+        return direction == BATTERY_FLOW_CHARGING
+    if get_battery_flows(station_data) is not None:
+        # Flow data is present but lists no battery node: the battery is idle,
+        # so there is no direction to report. Falling back to the sign of
+        # ``bms_power`` here would always claim "charging".
+        return None
+    # No flow data at all (older/different firmware): keep the legacy fallback.
+    bms_power = _optional_float(_reflux_data(station_data).get("bms_power"))
+    if bms_power is not None:
+        return bms_power > 0
+    return None
 
 
 def has_battery_telemetry(real_time_data: dict[str, Any] | None) -> bool:

@@ -67,14 +67,15 @@
       "battery_power": {
         "name": "Battery Power",
         "state_attributes": {
-          "direction": "Power flow direction (positive = charging, negative = discharging)"
+          "direction": "Power flow direction (positive = discharging, negative = charging)"
         }
       },
       "battery_flow_direction": {
         "name": "Battery Flow Direction",
         "state": {
           "charging": "Charging",
-          "discharging": "Discharging"
+          "discharging": "Discharging",
+          "unknown": "Unknown"
         }
       },
       "battery_soc": {

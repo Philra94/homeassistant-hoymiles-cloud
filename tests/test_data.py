@@ -14,7 +14,10 @@ build_station_capabilities = data_module.build_station_capabilities
 discover_pv_channels = data_module.discover_pv_channels
 find_placeholder_pv_channels = data_module.find_placeholder_pv_channels
 get_allowed_battery_modes = data_module.get_allowed_battery_modes
+get_battery_flow_direction = data_module.get_battery_flow_direction
 get_schedule_modes = data_module.get_schedule_modes
+get_signed_battery_power = data_module.get_signed_battery_power
+is_battery_charging = data_module.is_battery_charging
 latest_module_values = data_module.latest_module_values
 merge_missing_pv_channel_values = data_module.merge_missing_pv_channel_values
 relay_settings_enabled = data_module.relay_settings_enabled
@@ -462,3 +465,83 @@ def test_latest_module_values_handles_missing_chart() -> None:
         "MODULE_V": None,
         "MODULE_I": None,
     }
+
+
+def _station(reflux: dict | None) -> dict:
+    """Build a minimal station payload carrying the reflux data."""
+    return {"real_time_data": {"reflux_station_data": reflux if reflux is not None else {}}}
+
+
+def test_battery_flow_direction_charging() -> None:
+    """``in: 10`` marks the battery as the flow target, i.e. charging."""
+    station = _station({"bms_power": "812.0", "flows": [{"out": 4, "in": 10}]})
+
+    assert get_battery_flow_direction(station) == -1
+    assert is_battery_charging(station) is True
+    assert get_signed_battery_power(station) == -812.0
+
+
+def test_battery_flow_direction_discharging() -> None:
+    """``out: 10`` marks the battery as the flow source, i.e. discharging."""
+    station = _station({"bms_power": "450.5", "flows": [{"out": 10, "in": 1}]})
+
+    assert get_battery_flow_direction(station) == 1
+    assert is_battery_charging(station) is False
+    assert get_signed_battery_power(station) == 450.5
+
+
+def test_battery_flow_without_battery_node_is_unknown() -> None:
+    """An idle battery has no flow entry, so the direction stays unknown."""
+    station = _station({"bms_power": "0", "flows": [{"out": 4, "in": 1}, {"out": 2, "in": 1}]})
+
+    assert get_battery_flow_direction(station) is None
+    # The legacy ``bms_power > 0`` fallback must not claim "charging" here.
+    assert is_battery_charging(station) is None
+    assert get_signed_battery_power(station) == 0.0
+
+
+def test_battery_flow_empty_list_is_unknown() -> None:
+    """An empty flow array is still flow data, so no fallback is applied."""
+    station = _station({"bms_power": "120", "flows": []})
+
+    assert is_battery_charging(station) is None
+
+
+def test_battery_charging_falls_back_without_flow_data() -> None:
+    """Accounts that never report flows keep the legacy magnitude fallback."""
+    station = _station({"bms_power": "120"})
+
+    assert get_battery_flow_direction(station) is None
+    assert is_battery_charging(station) is True
+    assert get_signed_battery_power(station) == 120.0
+
+
+def test_battery_charging_falls_back_to_discharging_without_flow_data() -> None:
+    """A non-positive magnitude without flow data reports discharging."""
+    station = _station({"bms_power": "-30"})
+
+    assert is_battery_charging(station) is False
+    assert get_signed_battery_power(station) == -30.0
+
+
+def test_battery_helpers_handle_missing_bms_power() -> None:
+    """Missing or placeholder power yields unknown values, not zero."""
+    assert get_signed_battery_power(_station({})) is None
+    assert is_battery_charging(_station({})) is None
+    assert get_signed_battery_power(_station({"bms_power": "-"})) is None
+    assert is_battery_charging(_station({"bms_power": ""})) is None
+    assert get_signed_battery_power({}) is None
+    assert get_signed_battery_power(None) is None
+
+
+def test_battery_flow_direction_handles_malformed_flows() -> None:
+    """Non-list or non-dict flow payloads never raise."""
+    non_list = _station({"bms_power": "75", "flows": {"out": 10}})
+    assert get_battery_flow_direction(non_list) is None
+    # A malformed ``flows`` value counts as "no flow data", so the fallback applies.
+    assert is_battery_charging(non_list) is True
+    assert get_signed_battery_power(non_list) == 75.0
+
+    junk_entries = _station({"bms_power": "75", "flows": ["nonsense", None, {"out": 10, "in": 1}]})
+    assert get_battery_flow_direction(junk_entries) == 1
+    assert get_signed_battery_power(junk_entries) == 75.0
