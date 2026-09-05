@@ -30,7 +30,7 @@ from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .const import BATTERY_MODES, DOMAIN, METER_LOCATION_NAMES, INDICATOR_FLOW_STAT_TYPE_BATTERY
+from .const import BATTERY_MODES, DOMAIN, METER_LOCATION_NAMES
 from .data import (
     battery_settings_readable,
     discover_pv_channels,
@@ -38,9 +38,11 @@ from .data import (
     get_energy_flow_value,
     get_indicator_value,
     get_mode_settings,
-    get_schedule_modes,
-    get_supported_modes,
     get_pv_indicator_value,
+    get_schedule_modes,
+    get_signed_battery_power,
+    get_supported_modes,
+    is_battery_charging,
 )
 from .device import (
     build_battery_device_info,
@@ -113,48 +115,6 @@ def get_reflux_data(station_data: dict[str, Any]) -> dict[str, Any]:
 def get_nested_energy_total(station_data: dict[str, Any], key: str, period: str) -> int | None:
     """Return one nested energy total from the reflux data."""
     return safe_int_convert(get_reflux_data(station_data).get(key, {}).get(period))
-
-
-def _get_battery_flow_direction(station_data: dict[str, Any]) -> int | None:
-    """Return -1 for charging, 1 for discharging, None if unknown.
-
-    The API ``flows`` array contains entries where one field equals ``10``
-    (the battery node).  ``out: 10`` means the battery is the source
-    (discharging); ``in: 10`` means it is the target (charging).
-    """
-    flows = get_reflux_data(station_data).get("flows")
-    if not isinstance(flows, list):
-        return None
-    for flow in flows:
-        if not isinstance(flow, dict):
-            continue
-        if flow.get("out") == INDICATOR_FLOW_STAT_TYPE_BATTERY:
-            return 1
-        if flow.get("in") == INDICATOR_FLOW_STAT_TYPE_BATTERY:
-            return -1
-    return None
-
-
-def get_signed_battery_power(station_data: dict[str, Any]) -> float | None:
-    """Return signed battery power: positive = discharging, negative = charging."""
-    raw = safe_float_convert(get_reflux_data(station_data).get("bms_power"))
-    if raw is None:
-        return None
-    direction = _get_battery_flow_direction(station_data)
-    if direction is None:
-        return raw  # fallback: no flow info, return unsigned magnitude
-    return round(raw * direction, 2)
-
-
-def is_battery_charging(station_data: dict[str, Any]) -> bool | None:
-    """Determine whether the battery is charging based on live flows."""
-    direction = _get_battery_flow_direction(station_data)
-    if direction is not None:
-        return direction != 1
-    bms_power = safe_float_convert(get_reflux_data(station_data).get("bms_power"))
-    if bms_power is not None:
-        return bms_power > 0
-    return None
 
 
 def has_pv_indicator(station_data: dict[str, Any], key: str) -> bool:
@@ -268,7 +228,7 @@ STATION_SENSORS: list[HoymilesSensorDescription] = [
         suggested_display_precision=2,
         exists_fn=has_battery_telemetry,
         device_info_fn=get_battery_device_info,
-        value_fn=lambda data: get_signed_battery_power(data),
+        value_fn=get_signed_battery_power,
     ),
     HoymilesSensorDescription(
         key="battery_flow_direction",
