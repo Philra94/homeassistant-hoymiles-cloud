@@ -17,6 +17,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
 from .const import DOMAIN
+from .data import is_battery_charging
 from .device import build_primary_battery_device_info, build_station_device_info
 
 
@@ -30,21 +31,11 @@ def get_reflux_data(station_data: dict[str, Any]) -> dict[str, Any]:
     return station_data.get("real_time_data", {}).get("reflux_station_data", {})
 
 
-def safe_float(value: Any) -> float | None:
-    """Return a float if the value is numeric."""
-    try:
-        if value in (None, "", "-"):
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 @dataclass
 class HoymilesBinarySensorDescription(BinarySensorEntityDescription):
     """Declarative binary sensor definition."""
 
-    value_fn: Callable[[dict[str, Any]], bool] | None = None
+    value_fn: Callable[[dict[str, Any]], bool | None] | None = None
     exists_fn: Callable[[dict[str, Any]], bool] | None = None
     device_info_fn: Callable[[str, str, dict[str, Any]], dict[str, Any]] | None = None
 
@@ -54,7 +45,7 @@ DESCRIPTIONS: list[HoymilesBinarySensorDescription] = [
         key="battery_charging",
         name="Battery Charging",
         device_class=BinarySensorDeviceClass.BATTERY_CHARGING,
-        value_fn=lambda data: (safe_float(get_reflux_data(data).get("bms_power")) or 0.0) > 0,
+        value_fn=is_battery_charging,
         exists_fn=lambda data: bool(data.get("capabilities", {}).get("battery_telemetry")),
         device_info_fn=lambda sid, name, data: build_primary_battery_device_info(sid, name, data),
     ),
@@ -141,10 +132,13 @@ class HoymilesBinarySensor(CoordinatorEntity, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool | None:
-        """Return whether the binary sensor is on."""
+        """Return whether the binary sensor is on, or None when unknown."""
         if not self.entity_description.value_fn:
             return None
-        return bool(self.entity_description.value_fn(self._get_station_data()))
+        value = self.entity_description.value_fn(self._get_station_data())
+        if value is None:
+            return None
+        return bool(value)
 
     @property
     def available(self) -> bool:

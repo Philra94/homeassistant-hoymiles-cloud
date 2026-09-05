@@ -202,7 +202,10 @@ INDICATOR_TYPE_GRID = 2
 INDICATOR_TYPE_PV = 4
 INDICATOR_TYPE_METER_ES = 5
 
-# Indicator flow types
+# Node types used in the ``flows`` array of the indicators payload. Every flow
+# entry links a source (``out``) to a target (``in``) node. Only the battery
+# node is evaluated by the integration today; the remaining members are kept to
+# document the API's node-type enum for future flow-based sensors.
 INDICATOR_FLOW_STAT_TYPE_LOAD = 1
 INDICATOR_FLOW_STAT_TYPE_GRID = 2
 INDICATOR_FLOW_STAT_TYPE_PV = 4
