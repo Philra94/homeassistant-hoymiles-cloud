@@ -107,6 +107,28 @@ BATTERY_SETTINGS_MAX_POLLS = 10
 BATTERY_SETTINGS_POLL_INTERVAL = 1.0
 
 
+# A battery write leaves the plant "pending" for a few seconds, so the
+# read-back that confirms it needs a couple of attempts.
+BATTERY_WRITE_VERIFY_ATTEMPTS = 3
+BATTERY_WRITE_VERIFY_DELAY = 5  # seconds
+
+
+def _values_match(actual: Any, expected: Any) -> bool:
+    """Compare a stored settings value with what was written.
+
+    The cloud round-trips numbers loosely (50 comes back as 50.0, "20" as 20),
+    so compare numerically where both sides are numbers and fall back to string
+    equality otherwise. Lists and dicts (schedules) are not compared: the
+    backend normalises them and a mismatch there is not evidence of failure.
+    """
+    if isinstance(actual, (list, dict)) or isinstance(expected, (list, dict)):
+        return True
+    try:
+        return float(actual) == float(expected)
+    except (TypeError, ValueError):
+        return str(actual) == str(expected)
+
+
 class HoymilesAPI:
     """Hoymiles Cloud API client."""
 
@@ -1669,27 +1691,105 @@ class HoymilesAPI:
         )
         return False
 
+    async def _verify_battery_mode_applied(
+        self, station_id: str, mode: int, mode_settings: dict[str, Any]
+    ) -> bool:
+        """Re-read the settings and confirm the write actually took effect.
+
+        The direct endpoint has been observed answering ``{"status": "0",
+        "message": "success", "data": true}`` while leaving the plant unchanged
+        (issue #59, reproduced against real hardware). A vendor success response
+        is therefore not evidence that anything was applied, so every write is
+        confirmed by reading the state back.
+        """
+        # Straight after a write the plant answers "[Working Mode] pending",
+        # which makes the settings briefly unreadable. Retry before giving up,
+        # otherwise verification silently degrades to "assume it worked" in
+        # exactly the window where it is needed most.
+        settings = None
+        for attempt in range(BATTERY_WRITE_VERIFY_ATTEMPTS):
+            if attempt:
+                await asyncio.sleep(BATTERY_WRITE_VERIFY_DELAY)
+            settings = await self.get_battery_settings(station_id)
+            if battery_settings_readable(settings):
+                break
+        else:
+            # Cannot confirm either way; do not claim the write failed.
+            _LOGGER.debug(
+                "Could not verify battery write for station %s: settings stayed "
+                "unreadable after %s attempts",
+                station_id,
+                BATTERY_WRITE_VERIFY_ATTEMPTS,
+            )
+            return True
+
+        active_mode = (settings.get("data") or {}).get("mode")
+        if active_mode != mode:
+            _LOGGER.debug(
+                "Battery write verification for station %s: mode is %s, expected %s",
+                station_id,
+                active_mode,
+                mode,
+            )
+            return False
+
+        stored = (settings.get("mode_settings") or {}).get(mode) or {}
+        for key, expected in (mode_settings or {}).items():
+            if key not in stored:
+                continue
+            if not _values_match(stored.get(key), expected):
+                _LOGGER.debug(
+                    "Battery write verification for station %s mode %s: "
+                    "%s is %r, expected %r",
+                    station_id,
+                    mode,
+                    key,
+                    stored.get(key),
+                    expected,
+                )
+                return False
+        return True
+
     async def apply_battery_mode_payload(
         self, station_id: str, mode: int, mode_settings: dict[str, Any]
     ) -> bool:
-        """Write a battery mode payload, falling back to the async job flow.
+        """Write a battery mode payload and confirm it was actually applied.
 
-        Two transports exist. The direct endpoint is fast but undocumented; the
-        action-based flow (write -> job id -> status poll) is the one captured in
-        ``docs/hoymiles-battery-mode-api.md`` and is what the web UI uses. Some
-        accounts stopped accepting the direct write (issue #43), so a failure
-        there is retried through the documented flow before giving up.
+        Two transports exist. The action-based flow (write -> job id -> status
+        poll) is the one captured in ``docs/hoymiles-battery-mode-api.md`` and
+        is what the web UI uses; the direct endpoint is undocumented.
+
+        The documented flow is tried first. The direct endpoint was primary
+        until issue #59, where it was shown to report success while silently
+        applying nothing - confirmed on two unrelated accounts and different
+        hardware, so it is not a per-account quirk. It is kept only as a
+        fallback for accounts the documented flow might not serve, and because
+        its own answer cannot be trusted, both paths are verified by reading the
+        state back.
         """
-        if await self.set_battery_config_direct(station_id, mode, mode_settings):
+        if await self._write_battery_mode_payload(station_id, mode, mode_settings):
+            if await self._verify_battery_mode_applied(station_id, mode, mode_settings):
+                return True
+            _LOGGER.debug(
+                "Async battery write for station %s mode %s reported success but "
+                "did not apply; trying the direct endpoint",
+                station_id,
+                mode,
+            )
+
+        if not await self.set_battery_config_direct(station_id, mode, mode_settings):
+            return False
+
+        if await self._verify_battery_mode_applied(station_id, mode, mode_settings):
             return True
 
-        _LOGGER.debug(
-            "Direct battery write failed for station %s mode %s, "
-            "retrying via the async settings job flow",
+        _LOGGER.error(
+            "Battery write for station %s mode %s reported success on both "
+            "transports but the plant did not change",
             station_id,
             mode,
         )
-        return await self._write_battery_mode_payload(station_id, mode, mode_settings)
+        return False
 
     async def _write_battery_mode_payload(
         self, station_id: str, mode: int, mode_settings: dict[str, Any]
