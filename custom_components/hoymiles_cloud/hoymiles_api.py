@@ -98,6 +98,11 @@ DEFAULT_MODE_SETTINGS: dict[int, dict[str, Any]] = {
     7: {"reserve_soc": 30, "max_soc": 70, "meter_power": 3000},
     BATTERY_MODE_TIME_OF_USE: {"reserve_soc": 10},
 }
+INDICATOR_ENDPOINT_NAMES: dict[int, str] = {
+    INDICATOR_TYPE_PV: "pv_indicators",
+    INDICATOR_TYPE_GRID: "grid_indicators",
+    INDICATOR_TYPE_LOAD: "load_indicators",
+}
 BATTERY_SETTINGS_MAX_POLLS = 10
 BATTERY_SETTINGS_POLL_INTERVAL = 1.0
 
@@ -126,6 +131,75 @@ class HoymilesAPI:
         self._auth_base_url_override: str | None = None
         self._active_client_profile = CLIENT_PROFILE_WEB
         self._active_app_version: str | None = None
+        # Per-endpoint outcome of the most recent device/telemetry list call,
+        # keyed by "<station id>:<endpoint>". Purely informational state for
+        # diagnostics: it lets a permission denial ("status": "3") be told
+        # apart from a genuinely empty list.
+        self._fetch_status: Dict[str, Dict[str, Any]] = {}
+        self._fetch_failure_keys: set[str] = set()
+
+    @property
+    def device_fetch_status(self) -> Dict[str, Dict[str, Any]]:
+        """Return the last outcome of every station-scoped list endpoint."""
+        return deepcopy(self._fetch_status)
+
+    def _record_fetch_status(
+        self,
+        endpoint: str,
+        station_id: str,
+        *,
+        ok: bool,
+        status: Any = None,
+        message: Any = None,
+        total: Any = None,
+        count: int | None = None,
+        note: str | None = None,
+    ) -> None:
+        """Store the outcome of one station-scoped endpoint call."""
+        entry: Dict[str, Any] = {
+            "endpoint": endpoint,
+            "station_id": str(station_id),
+            "ok": ok,
+            "status": status,
+            "message": message,
+        }
+        if total is not None:
+            entry["total"] = total
+        if count is not None:
+            entry["count"] = count
+        if note:
+            entry["note"] = note
+        self._fetch_status[f"{station_id}:{endpoint}"] = entry
+
+    def _log_fetch_failure(
+        self,
+        endpoint: str,
+        station_id: str,
+        status: Any,
+        message: Any,
+    ) -> None:
+        """Warn on the first failure of an outage, then stay at debug.
+
+        These endpoints are polled on every static refresh, so a permanently
+        denied endpoint would otherwise fill the log with warnings.
+        """
+        key = f"{station_id}:{endpoint}"
+        log_args = (
+            "Hoymiles %s request for station %s was rejected: status=%s message=%s",
+            endpoint,
+            station_id,
+            status,
+            message,
+        )
+        if key in self._fetch_failure_keys:
+            _LOGGER.debug(*log_args)
+            return
+        self._fetch_failure_keys.add(key)
+        _LOGGER.warning(*log_args)
+
+    def _clear_fetch_failure(self, endpoint: str, station_id: str) -> None:
+        """Forget a recorded outage so the next failure warns again."""
+        self._fetch_failure_keys.discard(f"{station_id}:{endpoint}")
 
     def is_token_expired(self) -> bool:
         """Check if the token is expired."""
@@ -321,6 +395,7 @@ class HoymilesAPI:
         *,
         page_size: int = 100,
         extra_payload: dict[str, Any] | None = None,
+        endpoint: str = "unknown",
     ) -> list[dict[str, Any]]:
         """Return a full paginated list for one station-scoped endpoint."""
         items: list[dict[str, Any]] = []
@@ -337,9 +412,21 @@ class HoymilesAPI:
             }
             response = await self._post_json(url, payload)
             if response.get("status") != "0" or response.get("message") != "success":
-                _LOGGER.debug(
-                    "Paged station request to %s failed for %s: %s - %s",
-                    url,
+                # A mid-pagination failure discards the pages already collected
+                # (the caller gets []), so `count` here is what was read before
+                # the failure, not what the caller received. Kept as-is because
+                # a partial device list is worse than none, but the count is
+                # useful when diagnosing where pagination broke.
+                self._record_fetch_status(
+                    endpoint,
+                    station_id,
+                    ok=False,
+                    status=response.get("status"),
+                    message=response.get("message"),
+                    count=len(items),
+                )
+                self._log_fetch_failure(
+                    endpoint,
                     station_id,
                     response.get("status"),
                     response.get("message"),
@@ -349,6 +436,21 @@ class HoymilesAPI:
             data = response.get("data", {})
             page_items = data.get("list", []) if isinstance(data, dict) else []
             if not isinstance(page_items, list):
+                self._record_fetch_status(
+                    endpoint,
+                    station_id,
+                    ok=False,
+                    status=response.get("status"),
+                    message=response.get("message"),
+                    count=len(items),
+                    note="response data.list was not a list",
+                )
+                self._log_fetch_failure(
+                    endpoint,
+                    station_id,
+                    response.get("status"),
+                    "malformed data.list",
+                )
                 return []
             items.extend(item for item in page_items if isinstance(item, dict))
 
@@ -366,6 +468,16 @@ class HoymilesAPI:
                 break
             page_num += 1
 
+        self._record_fetch_status(
+            endpoint,
+            station_id,
+            ok=True,
+            status="0",
+            message="success",
+            total=total,
+            count=len(items),
+        )
+        self._clear_fetch_failure(endpoint, station_id)
         return items
 
     def _record_auth_failure(self, attempt: AuthAttempt) -> AuthAttempt:
@@ -935,19 +1047,27 @@ class HoymilesAPI:
 
     async def get_dtus(self, station_id: str) -> list[dict[str, Any]]:
         """Return all DTUs for a station."""
-        return await self._fetch_paged_station_list(API_DTUS_URL, station_id)
+        return await self._fetch_paged_station_list(
+            API_DTUS_URL, station_id, endpoint="dtus"
+        )
 
     async def get_inverters(self, station_id: str) -> list[dict[str, Any]]:
         """Return all string inverters for a station."""
-        return await self._fetch_paged_station_list(API_INVERTERS_URL, station_id)
+        return await self._fetch_paged_station_list(
+            API_INVERTERS_URL, station_id, endpoint="inverters"
+        )
 
     async def get_batteries(self, station_id: str) -> list[dict[str, Any]]:
         """Return all batteries for a station."""
-        return await self._fetch_paged_station_list(API_BATTERIES_URL, station_id)
+        return await self._fetch_paged_station_list(
+            API_BATTERIES_URL, station_id, endpoint="batteries"
+        )
 
     async def get_meters(self, station_id: str) -> list[dict[str, Any]]:
         """Return all meters for a station."""
-        return await self._fetch_paged_station_list(API_METERS_URL, station_id)
+        return await self._fetch_paged_station_list(
+            API_METERS_URL, station_id, endpoint="meters"
+        )
 
     async def get_indicator_data(
         self,
@@ -955,12 +1075,39 @@ class HoymilesAPI:
         indicator_type: int,
     ) -> dict[str, Any]:
         """Return one indicator payload by type."""
+        endpoint = INDICATOR_ENDPOINT_NAMES.get(
+            indicator_type, f"indicators_type_{indicator_type}"
+        )
         response = await self._post_json(
             API_INDICATORS_URL,
             {"sid": int(station_id), "type": indicator_type},
         )
         if response.get("status") == "0" and response.get("message") == "success":
-            return response.get("data", {}) if isinstance(response.get("data"), dict) else {}
+            data = response.get("data", {}) if isinstance(response.get("data"), dict) else {}
+            items = data.get("list") if isinstance(data, dict) else None
+            self._record_fetch_status(
+                endpoint,
+                station_id,
+                ok=True,
+                status="0",
+                message="success",
+                count=len(items) if isinstance(items, list) else 0,
+            )
+            self._clear_fetch_failure(endpoint, station_id)
+            return data
+        self._record_fetch_status(
+            endpoint,
+            station_id,
+            ok=False,
+            status=response.get("status"),
+            message=response.get("message"),
+        )
+        self._log_fetch_failure(
+            endpoint,
+            station_id,
+            response.get("status"),
+            response.get("message"),
+        )
         return {}
 
     async def get_load_indicators(self, station_id: str) -> dict[str, Any]:
@@ -1067,9 +1214,20 @@ class HoymilesAPI:
                 
                 if resp.get("status") == "0" and resp.get("message") == "success":
                     microinverters = {}
-                    microinverters_data = resp.get("data", {}).get("list", [])
+                    micro_page = resp.get("data", {}) if isinstance(resp.get("data"), dict) else {}
+                    microinverters_data = micro_page.get("list", []) or []
                     _LOGGER.debug("Raw microinverters data: %s", microinverters_data)
-                    
+                    self._record_fetch_status(
+                        "microinverters",
+                        station_id,
+                        ok=True,
+                        status="0",
+                        message="success",
+                        total=micro_page.get("total"),
+                        count=len(microinverters_data),
+                    )
+                    self._clear_fetch_failure("microinverters", station_id)
+
                     if not microinverters_data:
                         # Battery-only stations (e.g. HiBattery, MS-A2) legitimately have
                         # no microinverters. This runs on every coordinator poll, so it
@@ -1104,17 +1262,39 @@ class HoymilesAPI:
                                     _LOGGER.debug("Raw single microinverter id %s data: %s", microinverter_id, microinverter_single_data)
                                     
                                     if not microinverter_single_data:
-                                        _LOGGER.warning("API returned success but microinverter %s single data is empty", microinverter_id)
+                                        # Runs on every static refresh, so warn only
+                                        # on the first occurrence of an outage.
+                                        self._log_fetch_failure(
+                                            f"microinverter_detail:{microinverter_id}",
+                                            station_id,
+                                            resp.get("status"),
+                                            "success but empty detail payload",
+                                        )
                                         
+                                    else:
+                                        self._clear_fetch_failure(
+                                            f"microinverter_detail:{microinverter_id}",
+                                            station_id,
+                                        )
+
                                     _LOGGER.debug("Adding microinverters: %s - %s", microinverter_id, microinverter_single_data)
                                     microinverters[microinverter_id] = microinverter_single_data
 
                                 else:
                                     microinverters[microinverter_id] = {}
-                                    _LOGGER.error(
-                                        "Failed to get microinverters details: %s - %s", 
-                                        resp.get("status"), 
-                                        resp.get("message")
+                                    detail_endpoint = f"microinverter_detail:{microinverter_id}"
+                                    self._record_fetch_status(
+                                        detail_endpoint,
+                                        station_id,
+                                        ok=False,
+                                        status=resp.get("status"),
+                                        message=resp.get("message"),
+                                    )
+                                    self._log_fetch_failure(
+                                        detail_endpoint,
+                                        station_id,
+                                        resp.get("status"),
+                                        resp.get("message"),
                                     )
 
                         except Exception as e:
@@ -1124,10 +1304,18 @@ class HoymilesAPI:
                     _LOGGER.debug("Returning microinverters dictionary: %s", microinverters)
                     return microinverters
                 else:
-                    _LOGGER.error(
-                        "Failed to get microinverters: %s - %s", 
-                        resp.get("status"), 
-                        resp.get("message")
+                    self._record_fetch_status(
+                        "microinverters",
+                        station_id,
+                        ok=False,
+                        status=resp.get("status"),
+                        message=resp.get("message"),
+                    )
+                    self._log_fetch_failure(
+                        "microinverters",
+                        station_id,
+                        resp.get("status"),
+                        resp.get("message"),
                     )
                     return {}
         except Exception as e:
