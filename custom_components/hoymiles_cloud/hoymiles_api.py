@@ -412,6 +412,11 @@ class HoymilesAPI:
             }
             response = await self._post_json(url, payload)
             if response.get("status") != "0" or response.get("message") != "success":
+                # A mid-pagination failure discards the pages already collected
+                # (the caller gets []), so `count` here is what was read before
+                # the failure, not what the caller received. Kept as-is because
+                # a partial device list is worse than none, but the count is
+                # useful when diagnosing where pagination broke.
                 self._record_fetch_status(
                     endpoint,
                     station_id,
