@@ -1,17 +1,18 @@
 {
   "domain": "hoymiles_cloud",
   "name": "Hoymiles Cloud",
-  "codeowners": ["@Philra94"],
+  "codeowners": [
+    "@Philra94"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/Philra94/homeassistant-hoymiles-cloud",
-  "issue_tracker": "https://github.com/Philra94/homeassistant-hoymiles-cloud/issues",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
-  "single_config_entry": false,
-  "version": "1.2.1",
+  "issue_tracker": "https://github.com/Philra94/homeassistant-hoymiles-cloud/issues",
   "requirements": [
     "aiohttp>=3.8.0",
     "argon2-cffi>=21.3.0"
   ],
-  "icon": "mdi:solar-power-variant"
-} 
+  "single_config_entry": false,
+  "version": "1.2.1"
+}
