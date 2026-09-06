@@ -545,3 +545,37 @@ def test_battery_flow_direction_handles_malformed_flows() -> None:
     junk_entries = _station({"bms_power": "75", "flows": ["nonsense", None, {"out": 10, "in": 1}]})
     assert get_battery_flow_direction(junk_entries) == 1
     assert get_signed_battery_power(junk_entries) == 75.0
+
+
+def test_negative_value_rejected_for_total_increasing_counters() -> None:
+    """A negative counter reading must be withheld, not published.
+
+    Home Assistant reads a drop in a total_increasing sensor as a meter reset,
+    so publishing a negative would make the next normal reading land as one
+    huge delta and permanently inflate long-term statistics (issue #54).
+    """
+    assert data_module.is_invalid_total_increasing(-3461, True) is True
+    assert data_module.is_invalid_total_increasing(-0.5, True) is True
+
+
+def test_zero_and_positive_values_pass_through() -> None:
+    """Only negatives are rejected; zero is a legitimate counter value."""
+    assert data_module.is_invalid_total_increasing(0, True) is False
+    assert data_module.is_invalid_total_increasing(3461, True) is False
+    assert data_module.is_invalid_total_increasing(0.0, True) is False
+
+
+def test_negative_measurements_are_left_alone() -> None:
+    """Signed measurements must pass through untouched.
+
+    battery_power is legitimately negative while charging; a blanket
+    no-negatives rule would undo that.
+    """
+    assert data_module.is_invalid_total_increasing(-1200, False) is False
+
+
+def test_non_numeric_values_are_not_rejected() -> None:
+    """Unknown/None readings are handled elsewhere and must not be swallowed."""
+    assert data_module.is_invalid_total_increasing(None, True) is False
+    assert data_module.is_invalid_total_increasing("-5", True) is False
+    assert data_module.is_invalid_total_increasing(False, True) is False
