@@ -8,7 +8,11 @@ from tests.module_loader import load_integration_module
 from tests.pb_wire import encode_line_chart
 
 auth_module = load_integration_module("auth")
-HoymilesAPI = load_integration_module("hoymiles_api").HoymilesAPI
+hoymiles_api_module = load_integration_module("hoymiles_api")
+HoymilesAPI = hoymiles_api_module.HoymilesAPI
+# The verification read-back waits between attempts against the real cloud;
+# tests drive a fake session, so there is nothing to wait for.
+hoymiles_api_module.BATTERY_WRITE_VERIFY_DELAY = 0
 AUTH_ERROR_APP_UPDATE_REQUIRED = auth_module.AUTH_ERROR_APP_UPDATE_REQUIRED
 AUTH_ERROR_S_MILES_HOME_REQUIRED = auth_module.AUTH_ERROR_S_MILES_HOME_REQUIRED
 auth_error_to_config_error = auth_module.auth_error_to_config_error
@@ -205,122 +209,6 @@ def test_get_battery_settings_success_exposes_available_modes() -> None:
     assert battery_settings["data"]["reserve_soc"] == 30
     assert api._session.requests[0]["kwargs"]["json"] == {"action": 1013, "data": {"sid": 123}}
     assert api._session.requests[1]["kwargs"]["json"] == {"id": "job-123"}
-
-
-def test_set_battery_mode_uses_direct_write_payload() -> None:
-    """Battery mode writes should use the direct station battery-config endpoint."""
-    session = FakeSession(
-        [
-            {
-                "status": "0",
-                "message": "success",
-                "data": "read-job",
-            },
-            {
-                "status": "0",
-                "message": "success",
-                "data": {
-                    "code": 0,
-                    "data": {
-                        "mode": 1,
-                        "data": {
-                            "k_1": {"reserve_soc": 10},
-                        },
-                    },
-                },
-            },
-            {
-                "status": "0",
-                "message": "success",
-                "data": True,
-            },
-        ]
-    )
-    api = HoymilesAPI(session, "user@example.com", "secret")
-    api._token = "token"
-    api._token_expires_at = 9999999999
-
-    success = asyncio.run(api.set_battery_mode("123", 1))
-
-    assert success is True
-    assert session.requests[2]["kwargs"]["json"] == {
-        "sid": 123,
-        "mode": 1,
-        "data": {"reserve_soc": 10},
-    }
-
-
-def test_set_battery_mode_settings_merges_into_existing_schedule_payload() -> None:
-    """Advanced mode updates should preserve schedule data by default."""
-    session = FakeSession(
-        [
-            {
-                "status": "0",
-                "message": "success",
-                "data": "read-job",
-            },
-            {
-                "status": "0",
-                "message": "success",
-                "data": {
-                    "code": 0,
-                    "data": {
-                        "mode": 8,
-                        "data": {
-                            "k_8": {
-                                "reserve_soc": 10,
-                                "time": [
-                                    {
-                                        "cs_time": "03:00",
-                                        "ce_time": "05:00",
-                                        "c_power": 100,
-                                        "dcs_time": "05:00",
-                                        "dce_time": "03:00",
-                                        "dc_power": 100,
-                                        "charge_soc": 90,
-                                        "dis_charge_soc": 10,
-                                    }
-                                ],
-                            }
-                        },
-                    },
-                },
-            },
-            {
-                "status": "0",
-                "message": "success",
-                "data": True,
-            },
-        ]
-    )
-    api = HoymilesAPI(session, "user@example.com", "secret")
-    api._token = "token"
-    api._token_expires_at = 9999999999
-
-    success = asyncio.run(
-        api.set_battery_mode_settings("123", 8, {"reserve_soc": 15})
-    )
-
-    assert success is True
-    assert session.requests[2]["kwargs"]["json"] == {
-        "sid": 123,
-        "mode": 8,
-        "data": {
-            "reserve_soc": 15,
-            "time": [
-                {
-                    "cs_time": "03:00",
-                    "ce_time": "05:00",
-                    "c_power": 100,
-                    "dcs_time": "05:00",
-                    "dce_time": "03:00",
-                    "dc_power": 100,
-                    "charge_soc": 90,
-                    "dis_charge_soc": 10,
-                }
-            ],
-        },
-    }
 
 
 def test_authenticate_preserves_s_miles_home_failure_details() -> None:
@@ -803,55 +691,41 @@ def _read_battery_settings_responses(mode: int, mode_key: str) -> list[dict]:
     ]
 
 
-@pytest.mark.parametrize("falsy_data", [None, 0, "", {}, []])
-def test_direct_battery_write_accepts_success_with_falsy_data(falsy_data) -> None:
-    """A success status must not be read as failure because ``data`` is falsy.
 
-    The direct endpoint is undocumented and has been observed returning success
-    with an empty ``data`` field; treating that as a failure made writes look
-    like they silently did nothing (issue #43).
+def _read_job(mode: int, mode_key: str, settings: dict) -> list[dict]:
+    """The two responses of a battery-settings read job."""
+    return [
+        {"status": "0", "message": "success", "data": "read-job"},
+        {
+            "status": "0",
+            "message": "success",
+            "data": {"code": 0, "data": {"mode": mode, "data": {mode_key: settings}}},
+        },
+    ]
+
+
+def _async_write_job(ok: bool = True) -> list[dict]:
+    """The two responses of an action-1013 write job."""
+    if not ok:
+        return [{"status": "1", "message": "failed", "data": None}]
+    return [
+        {"status": "0", "message": "success", "data": "write-job"},
+        {"status": "0", "message": "success", "data": {"code": 0}},
+    ]
+
+
+def test_battery_write_prefers_the_documented_async_job_flow() -> None:
+    """The documented action-1013 flow must be tried before the direct endpoint.
+
+    The direct endpoint was primary until issue #59, where it was shown to
+    answer `{"status":"0","message":"success","data":true}` while applying
+    nothing at all - reproduced on two unrelated accounts and different
+    hardware.
     """
     session = FakeSession(
-        _read_battery_settings_responses(1, "k_1")
-        + [{"status": "0", "message": "success", "data": falsy_data}]
-    )
-    api = HoymilesAPI(session, "user@example.com", "secret")
-    api._token = "token"
-    api._token_expires_at = 9999999999
-
-    assert asyncio.run(api.set_battery_mode("123", 1)) is True
-    # The documented async fallback must not fire when the direct write worked.
-    assert len(session.requests) == 3
-
-
-def test_direct_battery_write_rejects_explicit_false_and_falls_back() -> None:
-    """``data: False`` is a real rejection, which then triggers the fallback."""
-    session = FakeSession(
-        _read_battery_settings_responses(1, "k_1")
-        + [
-            {"status": "0", "message": "success", "data": False},
-            # fallback: async write job, then its status poll
-            {"status": "0", "message": "success", "data": "write-job"},
-            {"status": "0", "message": "success", "data": {"code": 0}},
-        ]
-    )
-    api = HoymilesAPI(session, "user@example.com", "secret")
-    api._token = "token"
-    api._token_expires_at = 9999999999
-
-    assert asyncio.run(api.set_battery_mode("123", 1)) is True
-    assert len(session.requests) == 5
-
-
-def test_battery_write_falls_back_to_async_job_flow() -> None:
-    """A failing direct write is retried through the documented job flow."""
-    session = FakeSession(
-        _read_battery_settings_responses(1, "k_1")
-        + [
-            {"status": "1", "message": "failed", "data": None},
-            {"status": "0", "message": "success", "data": "write-job"},
-            {"status": "0", "message": "success", "data": {"code": 0}},
-        ]
+        _read_job(1, "k_1", {"reserve_soc": 10})      # settings read before write
+        + _async_write_job()                          # documented write
+        + _read_job(1, "k_1", {"reserve_soc": 10})    # verification read
     )
     api = HoymilesAPI(session, "user@example.com", "secret")
     api._token = "token"
@@ -859,24 +733,90 @@ def test_battery_write_falls_back_to_async_job_flow() -> None:
 
     assert asyncio.run(api.set_battery_mode("123", 1)) is True
 
-    # The fallback must use the documented action-1013 payload shape.
-    fallback_payload = session.requests[3]["kwargs"]["json"]
-    assert fallback_payload["action"] == 1013
-    assert fallback_payload["data"]["sid"] == 123
-    assert fallback_payload["data"]["data"]["mode"] == 1
+    write_payload = session.requests[2]["kwargs"]["json"]
+    assert write_payload["action"] == 1013
+    assert write_payload["data"]["sid"] == 123
+    assert write_payload["data"]["data"]["mode"] == 1
 
 
-def test_battery_write_reports_failure_when_both_transports_fail() -> None:
-    """Both transports failing must still surface as a failed write."""
+def test_battery_write_fails_when_the_plant_did_not_change() -> None:
+    """A success response that does not change the plant must not be trusted.
+
+    This is the exact issue #59 signature: both transports answer success while
+    the mode stays where it was.
+    """
     session = FakeSession(
-        _read_battery_settings_responses(1, "k_1")
-        + [
-            {"status": "1", "message": "failed", "data": None},
-            {"status": "1", "message": "failed", "data": None},
-        ]
+        _read_job(1, "k_1", {"reserve_soc": 10})
+        + _async_write_job()
+        + _read_job(1, "k_1", {"reserve_soc": 10})   # verify: still mode 1, not 5
+        + [{"status": "0", "message": "success", "data": True}]  # direct claims success
+        + _read_job(1, "k_1", {"reserve_soc": 10})   # verify again: still unchanged
     )
     api = HoymilesAPI(session, "user@example.com", "secret")
     api._token = "token"
     api._token_expires_at = 9999999999
 
-    assert asyncio.run(api.set_battery_mode("123", 1)) is False
+    assert asyncio.run(api.set_battery_mode("123", 5)) is False
+
+
+def test_battery_write_falls_back_to_direct_when_async_flow_fails() -> None:
+    """If the documented flow errors, the direct endpoint is still tried."""
+    session = FakeSession(
+        _read_job(1, "k_1", {"reserve_soc": 10})
+        + _async_write_job(ok=False)
+        + [{"status": "0", "message": "success", "data": True}]
+        + _read_job(1, "k_1", {"reserve_soc": 10})   # verification passes
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    assert asyncio.run(api.set_battery_mode("123", 1)) is True
+
+
+def test_battery_write_verification_tolerates_loose_numeric_types() -> None:
+    """The cloud round-trips 50 as 50.0 and "20" as 20; that is not a failure."""
+    session = FakeSession(
+        _read_job(5, "k_5", {"reserve_soc": 70, "max_power": 50.0})
+        + _async_write_job()
+        + _read_job(5, "k_5", {"reserve_soc": "70", "max_power": 50.0})
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    assert asyncio.run(api.set_battery_mode("123", 5)) is True
+
+
+def test_battery_write_retries_verification_while_the_plant_is_pending() -> None:
+    """A write leaves the plant briefly unreadable; verification must retry.
+
+    Observed against real hardware: immediately after a write the settings read
+    returns "[Working Mode] pending, please wait." Without a retry the check
+    degrades to "assume it worked" in exactly the window it is needed.
+    """
+    session = FakeSession(
+        _read_job(1, "k_1", {"reserve_soc": 10})
+        + _async_write_job()
+        + [{"status": "1", "message": "failed", "data": None}]   # pending
+        + _read_job(1, "k_1", {"reserve_soc": 11})               # now readable
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    assert asyncio.run(api.set_battery_mode_settings("123", 1, {"reserve_soc": 11})) is True
+
+
+def test_battery_write_is_not_failed_by_a_permanently_unreadable_verification() -> None:
+    """If the settings never become readable, do not claim the write failed."""
+    session = FakeSession(
+        _read_job(1, "k_1", {"reserve_soc": 10})
+        + _async_write_job()
+        + [{"status": "1", "message": "failed", "data": None}] * 3  # never readable
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+    api._token = "token"
+    api._token_expires_at = 9999999999
+
+    assert asyncio.run(api.set_battery_mode("123", 1)) is True
