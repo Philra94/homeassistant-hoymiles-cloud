@@ -57,6 +57,8 @@ Not all available Hoymiles API fields are exposed as entities yet, but unsupport
 
 ### HACS (Recommended)
 
+Until this repository is part of the HACS default list, add it as a custom repository:
+
 1. Make sure you have [HACS](https://hacs.xyz/) installed
 2. Go to HACS → Integrations → Plus Icon → "Add Custom Repository"
 3. Enter the URL: `https://github.com/Philra94/homeassistant-hoymiles-cloud`
@@ -64,6 +66,9 @@ Not all available Hoymiles API fields are exposed as entities yet, but unsupport
 5. Click "Add"
 6. Find and install "Hoymiles Cloud"
 7. Restart Home Assistant
+
+> **Note:** several forks of this repository exist. Make sure the URL above is the one
+> you add, otherwise you may end up on an older or diverged copy.
 
 ### Manual Installation
 
