@@ -12,7 +12,6 @@ from tests.module_loader import load_integration_module
 from tests.test_hoymiles_api import FakeSession
 
 HoymilesAPI = load_integration_module("hoymiles_api").HoymilesAPI
-iter_module_data_targets = load_integration_module("data").iter_module_data_targets
 
 
 def _authed_api(responses: list[dict]) -> HoymilesAPI:
@@ -142,44 +141,3 @@ def test_indicator_fetch_status_records_denial() -> None:
     assert entry["ok"] is False
     assert entry["status"] == "3"
 
-
-def test_module_data_targets_without_microinverters() -> None:
-    """A station without microinverters has no fallback target."""
-    assert iter_module_data_targets({}, [1, 2]) == []
-    assert iter_module_data_targets(None, [1, 2]) == []
-
-
-def test_module_data_targets_single_microinverter() -> None:
-    """The single-microinverter case keeps its previous behaviour."""
-    targets = iter_module_data_targets({"42": {"id": 42}}, [2, 1])
-
-    assert targets == [(42, [1, 2])]
-
-
-def test_module_data_targets_several_microinverters() -> None:
-    """Several microinverters are all considered, in a stable order."""
-    micros = {
-        "9": {"id": 9},
-        "7": {"id": 7},
-        "8": {"id": 8},
-    }
-
-    targets = iter_module_data_targets(micros, [1, 2])
-
-    assert targets == [(7, [1, 2]), (8, [1, 2]), (9, [1, 2])]
-
-
-def test_module_data_targets_skip_unusable_entries() -> None:
-    """Entries without a numeric id cannot be queried and are skipped."""
-    micros = {
-        "a": {"id": None},
-        "b": "not-a-dict",
-        "c": {"id": "12"},
-    }
-
-    assert iter_module_data_targets(micros, [1]) == [(12, [1])]
-
-
-def test_module_data_targets_without_placeholder_channels() -> None:
-    """Nothing is fetched when the indicators feed has real values."""
-    assert iter_module_data_targets({"42": {"id": 42}}, []) == []

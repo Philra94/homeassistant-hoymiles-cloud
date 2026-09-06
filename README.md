@@ -156,7 +156,7 @@ and account identifiers are redacted before the file is written.
 - Economy and Time-of-Use schedules now have draft editor entities in Home Assistant, but the integration still writes the full structured Hoymiles payload on apply.
 - Validation is intentionally conservative for schedule editing: time/date formats and basic numeric ranges are checked before writes, while ambiguous Hoymiles-specific semantics are kept internal.
 - API endpoints and payload structures are based on observed Hoymiles Cloud behavior and may still vary by region, account role, and hardware family.
-- On some hardware (observed: HF-800-1WB) the indicators endpoint returns placeholder values for per-channel PV data; the integration then falls back to the module-data chart endpoint (see `docs/hoymiles-module-data-api.md`). Stations with several microinverters are covered too; the extra chart requests are budgeted per refresh, so a large plant fills in its ports over a few polls instead of all at once. Those values are cached for a few minutes to match the cloud's own refresh rate, and drop to `0` once the inverter stops reporting for the day rather than repeating the last daylight reading.
+- On some hardware (observed: HF-800-1WB) the indicators endpoint returns placeholder values for per-channel PV data; the integration then falls back to the module-data chart endpoint (see `docs/hoymiles-module-data-api.md`) for single-microinverter stations. Those values are cached for a few minutes to match the cloud's own refresh rate, and drop to `0` once the inverter stops reporting for the day rather than repeating the last daylight reading.
 
 ## Contributing
 

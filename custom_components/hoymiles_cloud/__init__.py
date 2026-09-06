@@ -33,7 +33,6 @@ from .const import (
     DEFAULT_STATIC_REFRESH_INTERVAL,
     DOMAIN,
     MODULE_DATA_CACHE_INTERVAL,
-    MODULE_DATA_MAX_FETCHES_PER_REFRESH,
     STORAGE_KEY,
     STORAGE_VERSION,
 )
@@ -45,7 +44,6 @@ from .data import (
     build_station_capabilities,
     find_placeholder_pv_channels,
     get_schedule_draft,
-    iter_module_data_targets,
     merge_missing_pv_channel_values,
     remove_schedule_entry,
     set_schedule_editor_selection,
@@ -502,15 +500,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     static_station_cache: dict[str, dict[str, Any]] = {}
     static_station_cache_at: dict[str, float] = {}
-    module_data_cache: dict[tuple[str, int, int], dict[str, float | None]] = {}
-    module_data_cache_at: dict[tuple[str, int, int], float] = {}
-    module_data_failures: set[tuple[str, int, int]] = set()
+    module_data_cache: dict[tuple[str, int], dict[str, float | None]] = {}
+    module_data_cache_at: dict[tuple[str, int], float] = {}
+    module_data_failures: set[tuple[str, int]] = set()
 
     async def _async_module_values(
         station_id: str,
         mi_id: int,
         channels: list[int],
-        budget: list[int],
     ) -> dict[int, dict[str, float | None]]:
         """Return per-channel module chart values, cached across polls.
 
@@ -518,31 +515,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         chart is re-fetched at most once per MODULE_DATA_CACHE_INTERVAL instead
         of on every coordinator poll. That keeps the extra requests off the
         shared 30 second update budget.
-
-        ``budget`` is a single-element list holding the number of live requests
-        still allowed in this refresh; cache hits are free. It bounds a station
-        with many microinverters to a handful of requests per poll.
         """
-        def _log_failure(cache_key: tuple[str, int, int], reason: Any) -> None:
+        def _log_failure(cache_key: tuple[str, int], reason: Any) -> None:
             """Warn once per outage, then stay at debug.
 
             This path runs on every poll, so an endpoint that is simply
             unsupported for the account would otherwise flood the log.
             """
-            message = (
-                "Failed to get module channel data for station %s "
-                "microinverter %s port %s: %s"
-            )
+            message = "Failed to get module channel data for station %s port %s: %s"
             if cache_key in module_data_failures:
-                _LOGGER.debug(message, cache_key[0], cache_key[1], cache_key[2], reason)
+                _LOGGER.debug(message, cache_key[0], cache_key[1], reason)
                 return
             module_data_failures.add(cache_key)
-            _LOGGER.warning(message, cache_key[0], cache_key[1], cache_key[2], reason)
+            _LOGGER.warning(message, cache_key[0], cache_key[1], reason)
 
         values_by_channel: dict[int, dict[str, float | None]] = {}
         now = time.monotonic()
         for channel in channels:
-            cache_key = (station_id, mi_id, channel)
+            cache_key = (station_id, channel)
             cached = module_data_cache.get(cache_key)
             if (
                 cached is not None
@@ -552,16 +542,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if cached:
                     values_by_channel[channel] = cached
                 continue
-            if budget[0] <= 0:
-                _LOGGER.debug(
-                    "Module data request budget exhausted for station %s; "
-                    "microinverter %s port %s is deferred to a later refresh",
-                    station_id,
-                    mi_id,
-                    channel,
-                )
-                break
-            budget[0] -= 1
             try:
                 values = await api.get_module_channel_data(
                     station_id, mi_id, channel, now=dt_util.now()
@@ -699,39 +679,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "microinverters", {}
                     )
                     placeholder_channels = find_placeholder_pv_channels(pv_indicators)
-                    targets = iter_module_data_targets(
-                        microinverters, placeholder_channels
-                    )
-                    if targets:
-                        # Bound the extra requests: cache hits are free, and
-                        # anything past the budget is picked up by a later poll.
-                        budget = [MODULE_DATA_MAX_FETCHES_PER_REFRESH]
-                        merged_values: dict[int, dict[str, float | None]] = {}
-                        for mi_id, channels in targets:
-                            pending = [
-                                channel
-                                for channel in channels
-                                if channel not in merged_values
-                            ]
-                            if not pending:
-                                break
+                    if placeholder_channels and len(microinverters) == 1:
+                        micro = next(iter(microinverters.values()))
+                        mi_id = micro.get("id") if isinstance(micro, dict) else None
+                        if mi_id is not None:
                             module_values_by_channel = await _async_module_values(
-                                station_id, mi_id, pending, budget
+                                station_id, mi_id, placeholder_channels
                             )
-                            # The first microinverter that reports a channel
-                            # wins; the indicators feed does not say which
-                            # microinverter owns which port.
-                            for channel, values in module_values_by_channel.items():
-                                merged_values.setdefault(channel, values)
-                            if budget[0] <= 0:
-                                break
-                        if merged_values:
-                            pv_indicators = merge_missing_pv_channel_values(
-                                pv_indicators, merged_values
-                            )
+                            if module_values_by_channel:
+                                pv_indicators = merge_missing_pv_channel_values(
+                                    pv_indicators, module_values_by_channel
+                                )
                     elif placeholder_channels:
                         _LOGGER.debug(
-                            "No module data fallback target for station %s: "
+                            "Skipping module data fallback for station %s: "
                             "%s microinverters",
                             station_id,
                             len(microinverters),
