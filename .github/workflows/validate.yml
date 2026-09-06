@@ -1,0 +1,45 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Upstream tooling changes independently of this repo, so re-run weekly to
+    # catch breakage before a HACS user does.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration
+
+  hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hassfest validation
+        uses: home-assistant/actions/hassfest@master
+
+  tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest aiohttp
+      - name: Run tests
+        # The suite deliberately runs without Home Assistant installed; see
+        # tests/module_loader.py and AGENTS.md.
+        run: pytest -q
