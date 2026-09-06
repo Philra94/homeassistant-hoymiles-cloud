@@ -50,7 +50,55 @@ REDACT_KEYS = {
     "u",
     "user_name",
     "username",
+    # Device and telemetry payloads carry serials/account identifiers under
+    # several spellings. They are redacted so the newly added inventory and
+    # indicator payloads stay safe to paste into an issue.
+    "dtu_sn",
+    "micro_sn",
+    "device_sn",
+    "mi_sn",
+    "phone",
+    "mobile",
+    "user_id",
+    "uid",
 }
+
+# Any key ending in one of these is redacted as well, so an unknown field in a
+# telemetry payload cannot leak a serial or an address.
+REDACT_KEY_SUFFIXES = (
+    "_sn",
+    "_addr",
+    "_address",
+    "_email",
+    "_phone",
+    "_mobile",
+    "_lat",
+    "_lng",
+    "_latitude",
+    "_longitude",
+)
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    """Return whether a payload key must be redacted."""
+    if not isinstance(key, str):
+        return False
+    lowered = key.lower()
+    if lowered in REDACT_KEYS:
+        return True
+    return lowered.endswith(REDACT_KEY_SUFFIXES)
+
+
+def _redact_sensitive_keys(value: Any) -> Any:
+    """Recursively redact sensitive keys, including suffix matches."""
+    if isinstance(value, dict):
+        return {
+            key: ("**REDACTED**" if _is_sensitive_key(key) else _redact_sensitive_keys(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive_keys(item) for item in value]
+    return value
 
 
 def _redact_schedule_shapes(value: Any) -> Any:
@@ -78,7 +126,27 @@ def _station_summary(station_data: dict[str, Any]) -> dict[str, Any]:
             "inverters": devices.get("inverters", []),
             "batteries": devices.get("batteries", []),
             "meters": devices.get("meters", []),
+            # HMS/HMT microinverters never appear under "inverters" (that
+            # endpoint serves string/hybrid inverters), so omitting this key
+            # made "no devices" reports impossible to tell apart from a
+            # correctly discovered microinverter-only station - see issue #41.
+            "microinverters": devices.get("microinverters", {}),
         },
+        "device_counts": {
+            "dtus": len(devices.get("dtus", []) or []),
+            "inverters": len(devices.get("inverters", []) or []),
+            "batteries": len(devices.get("batteries", []) or []),
+            "meters": len(devices.get("meters", []) or []),
+            "microinverters": len(devices.get("microinverters", {}) or {}),
+        },
+        # Raw telemetry feeds. These are the payloads that decide which PV,
+        # grid and load entities exist, so a "missing entities" report cannot
+        # be diagnosed without them.
+        "real_time_data": station_data.get("real_time_data", {}),
+        "pv_indicators": station_data.get("pv_indicators", {}),
+        "grid_indicators": station_data.get("grid_indicators", {}),
+        "load_indicators": station_data.get("load_indicators", {}),
+        "energy_flow": station_data.get("energy_flow", {}),
         "setting_rules": station_data.get("setting_rules", {}),
         "battery_mode_gating": {
             "backend_modes": get_backend_modes(station_data.get("battery_settings")),
@@ -126,6 +194,10 @@ async def async_get_config_entry_diagnostics(
             "last_auth_message": api.last_auth_message,
             "last_auth_attempt_summary": api.last_auth_attempt_summary,
         },
+        # Last outcome of every station-scoped list endpoint, so an empty
+        # device list can be told apart from a denied one ("status": "3",
+        # "No Permission").
+        "device_fetch_status": getattr(api, "device_fetch_status", {}) or {},
         "coordinator": {
             "last_update_success": coordinator.last_update_success,
             "station_count": len(coordinator_data),
@@ -136,4 +208,4 @@ async def async_get_config_entry_diagnostics(
         },
     }
 
-    return async_redact_data(payload, REDACT_KEYS)
+    return _redact_sensitive_keys(async_redact_data(payload, REDACT_KEYS))

@@ -137,6 +137,17 @@ For structured battery settings and automation-friendly editor flows, the integr
 
 `set_battery_mode_settings` accepts a raw settings dictionary and merges it into the live Hoymiles mode payload by default. This is the recommended path for advanced Economy (`mode: 2`) and Time of Use (`mode: 8`) schedule updates because the backend expects the full mode payload to be preserved.
 
+### Diagnostics
+
+If devices or entities are missing, download the diagnostics from the integration entry
+(**Settings → Devices & Services → Hoymiles Cloud → ⋮ → Download diagnostics**) and attach
+them to your issue. The export lists every discovered device family — including
+microinverters, which are fetched from a different endpoint than string/hybrid inverters —
+the raw indicator/telemetry payloads behind the PV, grid and load entities, and a
+`device_fetch_status` block showing whether each device endpoint returned an empty list or
+was rejected by the account (e.g. `No Permission`). Serial numbers, addresses, coordinates
+and account identifiers are redacted before the file is written.
+
 ## Notes
 
 - The integration uses the modern Hoymiles v3 authentication flow with the observed browser-compatible hashing fallback.
