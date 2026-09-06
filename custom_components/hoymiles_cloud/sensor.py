@@ -41,6 +41,7 @@ from .data import (
     get_pv_indicator_value,
     get_schedule_modes,
     get_signed_battery_power,
+    is_invalid_total_increasing,
     get_supported_modes,
     is_battery_charging,
 )
@@ -895,6 +896,7 @@ class HoymilesAggregateSensor(HoymilesBaseSensor):
         """Initialize the sensor."""
         super().__init__(coordinator, station_id, station_name)
         self.entity_description = description
+        self._negative_value_warned = False
         station_data = self._get_station_data()
         self._attr_unique_id = f"{DOMAIN}_{station_id}_{description.key}"
         self._attr_name = f"{station_name} {description.name}"
@@ -904,16 +906,38 @@ class HoymilesAggregateSensor(HoymilesBaseSensor):
             else get_station_device_info(station_id, station_name, station_data)
         )
 
+    def _reject_negative(self, value: Any) -> None:
+        """Warn once per outage that a counter went negative, then stay quiet."""
+        message = (
+            "Ignoring negative value %s for %s, which is a total_increasing "
+            "counter; reporting it would corrupt long-term statistics"
+        )
+        if self._negative_value_warned:
+            _LOGGER.debug(message, value, self.entity_description.key)
+            return
+        self._negative_value_warned = True
+        _LOGGER.warning(message, value, self.entity_description.key)
+
     @property
     def native_value(self) -> StateType:
         """Return the state of the sensor."""
         if not self.entity_description.value_fn:
             return None
         try:
-            return self.entity_description.value_fn(self._get_station_data())
+            value = self.entity_description.value_fn(self._get_station_data())
         except Exception as err:  # pragma: no cover - defensive logging
             _LOGGER.error("Error getting sensor value for %s: %s", self.entity_description.key, err)
             return None
+
+        if is_invalid_total_increasing(
+            value,
+            self.entity_description.state_class == SensorStateClass.TOTAL_INCREASING,
+        ):
+            self._reject_negative(value)
+            return None
+
+        self._negative_value_warned = False
+        return value
 
     @property
     def available(self) -> bool:

@@ -807,6 +807,26 @@ def merge_missing_pv_channel_values(
     return merged
 
 
+def is_invalid_total_increasing(value: Any, total_increasing: bool) -> bool:
+    """Return whether a value must be withheld from a total_increasing sensor.
+
+    Home Assistant treats a drop in a ``total_increasing`` sensor as a meter
+    reset, so a negative reading is not merely cosmetic: the next normal value
+    is recorded as one huge delta and permanently inflates long-term
+    statistics. The Hoymiles cloud has been observed returning negative values
+    for daily energy counters on systems where the underlying figure is derived
+    rather than metered (issue #54).
+
+    Only counters are affected. Measurements such as battery power are
+    legitimately signed and must pass through untouched.
+    """
+    if not total_increasing:
+        return False
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value < 0
+
+
 MODULE_DATA_QUOTAS = ("MODULE_POWER", "MODULE_V", "MODULE_I")
 
 
