@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document captures an authenticated browser investigation of the Hoymiles S-Miles Cloud battery working mode UI for plant `6703580`.
+This document captures an authenticated browser investigation of the Hoymiles S-Miles Cloud battery working mode UI for plant `<STATION_ID>`.
 
 - Investigation method: Playwright MCP against the live Hoymiles Cloud web UI
 - UI path: `Plant -> Settings -> Battery`
@@ -59,7 +59,7 @@ The `authorization` header is session-specific and should be treated as opaque.
 Request body:
 
 ```json
-{"sid":6703580}
+{"sid":<STATION_ID>}
 ```
 
 Observed response:
@@ -98,7 +98,7 @@ Notes:
 Request body:
 
 ```json
-{"sid":6703580}
+{"sid":<STATION_ID>}
 ```
 
 Observed response:
@@ -129,7 +129,7 @@ Request body:
 {
   "action": 1013,
   "data": {
-    "sid": 6703580
+    "sid": <STATION_ID>
   }
 }
 ```
@@ -173,12 +173,12 @@ Observed response:
     "code": 2,
     "speed": [
       {
-        "sn": "214422470204",
+        "sn": "<SERIAL>",
         "type": 6,
         "rate": -1,
         "err_code": "",
-        "sid": 6703580,
-        "station_name": "Rau - Bad Schönborn",
+        "sid": <STATION_ID>,
+        "station_name": "<STATION_NAME>",
         "module": "006000"
       }
     ],
@@ -206,12 +206,12 @@ Observed response:
     "code": 0,
     "speed": [
       {
-        "sn": "214422470204",
+        "sn": "<SERIAL>",
         "type": 6,
         "rate": 100,
         "err_code": "",
-        "sid": 6703580,
-        "station_name": "Rau - Bad Schönborn",
+        "sid": <STATION_ID>,
+        "station_name": "<STATION_NAME>",
         "module": "006000"
       }
     ],
@@ -347,7 +347,7 @@ All writes used the same wrapper:
 {
   "action": 1013,
   "data": {
-    "sid": 6703580,
+    "sid": <STATION_ID>,
     "data": {
       "mode": "<mode number>",
       "data": {
@@ -393,12 +393,12 @@ In progress:
     "code": 2,
     "speed": [
       {
-        "sn": "214422470204",
+        "sn": "<SERIAL>",
         "type": 6,
         "rate": -1,
         "err_code": "",
-        "sid": 6703580,
-        "station_name": "Rau - Bad Schönborn",
+        "sid": <STATION_ID>,
+        "station_name": "<STATION_NAME>",
         "module": "006000"
       }
     ],
@@ -418,12 +418,12 @@ Complete:
     "code": 0,
     "speed": [
       {
-        "sn": "214422470204",
+        "sn": "<SERIAL>",
         "type": 6,
         "rate": 100,
         "err_code": "",
-        "sid": 6703580,
-        "station_name": "Rau - Bad Schönborn",
+        "sid": <STATION_ID>,
+        "station_name": "<STATION_NAME>",
         "module": "006000"
       }
     ],
@@ -446,7 +446,7 @@ Observed write body:
 {
   "action": 1013,
   "data": {
-    "sid": 6703580,
+    "sid": <STATION_ID>,
     "data": {
       "mode": 1,
       "data": {
@@ -465,7 +465,7 @@ Observed write body:
 {
   "action": 1013,
   "data": {
-    "sid": 6703580,
+    "sid": <STATION_ID>,
     "data": {
       "mode": 2,
       "data": {
@@ -545,7 +545,7 @@ Observed write body:
 {
   "action": 1013,
   "data": {
-    "sid": 6703580,
+    "sid": <STATION_ID>,
     "data": {
       "mode": 3,
       "data": {
@@ -564,7 +564,7 @@ Observed write body:
 {
   "action": 1013,
   "data": {
-    "sid": 6703580,
+    "sid": <STATION_ID>,
     "data": {
       "mode": 4
     }
@@ -580,7 +580,7 @@ Observed write body:
 {
   "action": 1013,
   "data": {
-    "sid": 6703580,
+    "sid": <STATION_ID>,
     "data": {
       "mode": 7,
       "data": {
@@ -601,7 +601,7 @@ Observed write body:
 {
   "action": 1013,
   "data": {
-    "sid": 6703580,
+    "sid": <STATION_ID>,
     "data": {
       "mode": 8,
       "data": {
@@ -665,12 +665,12 @@ Used by `dev/setting/read`.
     "code": 2,
     "speed": [
       {
-        "sn": "<device sn>",
+        "sn": "<SERIAL>",
         "type": 6,
         "rate": -1,
         "err_code": "",
-        "sid": 6703580,
-        "station_name": "<station name>",
+        "sid": <STATION_ID>,
+        "station_name": "<STATION_NAME>",
         "module": "006000"
       }
     ],
@@ -690,12 +690,12 @@ Used by `dev/setting/read`.
     "code": 0,
     "speed": [
       {
-        "sn": "<device sn>",
+        "sn": "<SERIAL>",
         "type": 6,
         "rate": 100,
         "err_code": "",
-        "sid": 6703580,
-        "station_name": "<station name>",
+        "sid": <STATION_ID>,
+        "station_name": "<STATION_NAME>",
         "module": "006000"
       }
     ],
