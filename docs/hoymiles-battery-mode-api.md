@@ -178,7 +178,7 @@ Observed response:
         "rate": -1,
         "err_code": "",
         "sid": <STATION_ID>,
-        "station_name": "Rau - <STATION_NAME>",
+        "station_name": "<STATION_NAME>",
         "module": "006000"
       }
     ],
@@ -211,7 +211,7 @@ Observed response:
         "rate": 100,
         "err_code": "",
         "sid": <STATION_ID>,
-        "station_name": "Rau - <STATION_NAME>",
+        "station_name": "<STATION_NAME>",
         "module": "006000"
       }
     ],
@@ -398,7 +398,7 @@ In progress:
         "rate": -1,
         "err_code": "",
         "sid": <STATION_ID>,
-        "station_name": "Rau - <STATION_NAME>",
+        "station_name": "<STATION_NAME>",
         "module": "006000"
       }
     ],
@@ -423,7 +423,7 @@ Complete:
         "rate": 100,
         "err_code": "",
         "sid": <STATION_ID>,
-        "station_name": "Rau - <STATION_NAME>",
+        "station_name": "<STATION_NAME>",
         "module": "006000"
       }
     ],
@@ -665,12 +665,12 @@ Used by `dev/setting/read`.
     "code": 2,
     "speed": [
       {
-        "sn": "<device sn>",
+        "sn": "<SERIAL>",
         "type": 6,
         "rate": -1,
         "err_code": "",
         "sid": <STATION_ID>,
-        "station_name": "<station name>",
+        "station_name": "<STATION_NAME>",
         "module": "006000"
       }
     ],
@@ -690,12 +690,12 @@ Used by `dev/setting/read`.
     "code": 0,
     "speed": [
       {
-        "sn": "<device sn>",
+        "sn": "<SERIAL>",
         "type": 6,
         "rate": 100,
         "err_code": "",
         "sid": <STATION_ID>,
-        "station_name": "<station name>",
+        "station_name": "<STATION_NAME>",
         "module": "006000"
       }
     ],
