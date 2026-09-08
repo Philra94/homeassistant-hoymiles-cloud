@@ -14,6 +14,7 @@ from .const import (
     BATTERY_MODE_IDS,
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_SCHEDULE_MODE_IDS,
+    EV_CHARGER_FLAG_KEYS,
     INDICATOR_FLOW_STAT_TYPE_BATTERY,
     METER_LOCATION_NAMES,
     MODULE_DATA_MAX_AGE_MINUTES,
@@ -1000,6 +1001,56 @@ def is_battery_charging(station_data: dict[str, Any] | None) -> bool | None:
     return None
 
 
+def _ev_charger_flags(reflux_data: dict[str, Any]) -> list[Any]:
+    """Return the charging-pile icon flags the payload actually carries."""
+    return [reflux_data[key] for key in EV_CHARGER_FLAG_KEYS if key in reflux_data]
+
+
+def _flag_is_set(value: Any) -> bool:
+    """Return whether an API icon flag is set, tolerating string encodings."""
+    number = _optional_float(value)
+    if number is None:
+        return bool(value)
+    return number != 0
+
+
+def has_ev_charger(station_data: dict[str, Any] | None) -> bool:
+    """Return whether the station advertises a charging pile.
+
+    ``pile_power`` is present in the reflux payload of stations that have no EV
+    charger at all, where it does not carry charger telemetry (issue #64: it
+    mirrored PV power on a station with no vehicle connected). The vendor app
+    gates the charging-pile node on the ``icon_plug``/``icon_ai_plug`` flags, so
+    the same gate is applied here. Payloads that carry neither flag keep the
+    previous behaviour, so stations on older firmware do not lose the entity.
+    """
+    reflux_data = _reflux_data(station_data)
+    if _optional_float(reflux_data.get("pile_power")) is None:
+        return False
+    flags = _ev_charger_flags(reflux_data)
+    if not flags:
+        return True
+    return any(_flag_is_set(flag) for flag in flags)
+
+
+def get_ev_charger_power(station_data: dict[str, Any] | None) -> float | None:
+    """Return EV charger power, or 0 W when no charging pile is active.
+
+    The station keeps reporting a ``pile_power`` value while the icon flags say
+    no pile is connected; that value is not charger telemetry, so it is replaced
+    by an explicit 0 rather than published or dropped. Keeping the entity at 0
+    (instead of unavailable) avoids gaps in long-term statistics.
+    """
+    reflux_data = _reflux_data(station_data)
+    power = _optional_float(reflux_data.get("pile_power"))
+    if power is None:
+        return None
+    flags = _ev_charger_flags(reflux_data)
+    if flags and not any(_flag_is_set(flag) for flag in flags):
+        return 0.0
+    return power
+
+
 def has_battery_telemetry(real_time_data: dict[str, Any] | None) -> bool:
     """Return whether real-time data contains battery telemetry."""
     reflux_data = (real_time_data or {}).get("reflux_station_data", {})
@@ -1042,6 +1093,7 @@ def build_station_capabilities(
 
     return {
         "battery_telemetry": has_battery_telemetry(real_time_data),
+        "ev_charger_available": has_ev_charger({"real_time_data": real_time_data or {}}),
         "battery_settings_readable": battery_settings_readable(battery_settings),
         "battery_settings_writable": battery_settings_writable(battery_settings),
         "relay_settings_readable": relay_settings_readable(relay_settings),

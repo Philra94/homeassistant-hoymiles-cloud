@@ -211,6 +211,12 @@ INDICATOR_FLOW_STAT_TYPE_GRID = 2
 INDICATOR_FLOW_STAT_TYPE_PV = 4
 INDICATOR_FLOW_STAT_TYPE_BATTERY = 10
 
+# Keys of the live reflux payload that advertise a charging pile (EV charger).
+# The vendor app renders the charging-pile node only when one of these icon
+# flags is set; ``pile_power`` itself is emitted even by stations that have no
+# charger at all, where it does not carry charger telemetry.
+EV_CHARGER_FLAG_KEYS = ("icon_plug", "icon_ai_plug")
+
 # Energy-flow stats types
 ENERGY_FLOW_STAT_TYPE_OVERVIEW = 1
 ENERGY_FLOW_STAT_TYPE_BATTERY = 4
