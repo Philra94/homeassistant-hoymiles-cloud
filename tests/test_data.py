@@ -18,7 +18,9 @@ get_allowed_battery_modes = data_module.get_allowed_battery_modes
 get_battery_flow_direction = data_module.get_battery_flow_direction
 get_schedule_modes = data_module.get_schedule_modes
 get_microinverter_port_count = data_module.get_microinverter_port_count
+get_ev_charger_power = data_module.get_ev_charger_power
 get_signed_battery_power = data_module.get_signed_battery_power
+has_ev_charger = data_module.has_ev_charger
 is_battery_charging = data_module.is_battery_charging
 latest_module_values = data_module.latest_module_values
 merge_missing_pv_channel_values = data_module.merge_missing_pv_channel_values
@@ -702,3 +704,67 @@ def test_non_numeric_values_are_not_rejected() -> None:
     assert data_module.is_invalid_total_increasing(None, True) is False
     assert data_module.is_invalid_total_increasing("-5", True) is False
     assert data_module.is_invalid_total_increasing(False, True) is False
+
+
+def _station_with_reflux(**reflux: object) -> dict:
+    """Build a station payload carrying the given reflux fields."""
+    return {"real_time_data": {"reflux_station_data": reflux}}
+
+
+def test_ev_charger_hidden_when_no_pile_is_advertised() -> None:
+    """A station without a charging pile must not get the sensor.
+
+    pile_power is emitted regardless of whether a charger exists, and on a
+    station without one it mirrored PV power (issue #64). The icon flags are
+    what the vendor app gates the charging-pile node on.
+    """
+    station = _station_with_reflux(pile_power="742", icon_plug=0, icon_ai_plug=0)
+
+    assert has_ev_charger(station) is False
+
+
+def test_ev_charger_power_reports_zero_while_no_pile_is_connected() -> None:
+    """The mirrored value is replaced by 0 W, not published or dropped."""
+    station = _station_with_reflux(pile_power="742", icon_plug=0, icon_ai_plug=0)
+
+    assert get_ev_charger_power(station) == 0.0
+
+
+def test_ev_charger_exposed_when_a_pile_is_advertised() -> None:
+    """Either icon flag is enough to treat pile_power as charger telemetry."""
+    plain = _station_with_reflux(pile_power="3600", icon_plug=1, icon_ai_plug=0)
+    ai = _station_with_reflux(pile_power="3600", icon_plug="0", icon_ai_plug="1")
+
+    assert has_ev_charger(plain) is True
+    assert get_ev_charger_power(plain) == 3600.0
+    assert has_ev_charger(ai) is True
+    assert get_ev_charger_power(ai) == 3600.0
+
+
+def test_ev_charger_keeps_legacy_behaviour_without_icon_flags() -> None:
+    """Payloads that carry neither flag must not lose the entity."""
+    station = _station_with_reflux(pile_power="3600")
+
+    assert has_ev_charger(station) is True
+    assert get_ev_charger_power(station) == 3600.0
+
+
+def test_ev_charger_absent_without_pile_power() -> None:
+    """No pile_power at all means there is nothing to report."""
+    assert has_ev_charger(_station_with_reflux(icon_plug=1)) is False
+    assert has_ev_charger(_station_with_reflux(pile_power="-")) is False
+    assert get_ev_charger_power(_station_with_reflux()) is None
+
+
+def test_capabilities_report_ev_charger_availability() -> None:
+    """Diagnostics should show whether the charger sensor was created."""
+    real_time_data = {"reflux_station_data": {"pile_power": "742", "icon_plug": 0}}
+
+    capabilities = build_station_capabilities(
+        real_time_data=real_time_data,
+        pv_indicators={},
+        battery_settings={},
+        microinverters_data={},
+    )
+
+    assert capabilities["ev_charger_available"] is False

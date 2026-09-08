@@ -36,6 +36,7 @@ from .data import (
     discover_pv_channels,
     get_allowed_battery_modes,
     get_energy_flow_value,
+    get_ev_charger_power,
     get_indicator_value,
     get_mode_settings,
     get_pv_indicator_value,
@@ -43,6 +44,7 @@ from .data import (
     get_signed_battery_power,
     is_invalid_total_increasing,
     get_supported_modes,
+    has_ev_charger,
     is_battery_charging,
 )
 from .device import (
@@ -189,6 +191,9 @@ class HoymilesSensorDescription(SensorEntityDescription):
 
     value_fn: Callable[[dict[str, Any]], StateType] | None = None
     exists_fn: Callable[[dict[str, Any]], bool] | None = None
+    # Defaults to ``exists_fn``. Set it when an entity should be created
+    # only under a narrow condition but must stay available afterwards.
+    available_fn: Callable[[dict[str, Any]], bool] | None = None
     device_info_fn: Callable[[str, str, dict[str, Any]], dict[str, Any]] | None = None
 
 
@@ -461,8 +466,9 @@ STATION_SENSORS: list[HoymilesSensorDescription] = [
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=2,
-        exists_fn=lambda data: safe_float_convert(get_reflux_data(data).get("pile_power")) is not None,
-        value_fn=lambda data: safe_float_convert(get_reflux_data(data).get("pile_power")),
+        exists_fn=has_ev_charger,
+        available_fn=lambda data: safe_float_convert(get_reflux_data(data).get("pile_power")) is not None,
+        value_fn=get_ev_charger_power,
     ),
     HoymilesSensorDescription(
         key="self_consumption_rate",
@@ -944,8 +950,9 @@ class HoymilesAggregateSensor(HoymilesBaseSensor):
         """Return if entity is available."""
         if not self.coordinator.last_update_success:
             return False
-        if self.entity_description.exists_fn:
-            return self.entity_description.exists_fn(self._get_station_data())
+        available_fn = self.entity_description.available_fn or self.entity_description.exists_fn
+        if available_fn:
+            return available_fn(self._get_station_data())
         return bool(self._get_station_data())
 
 
