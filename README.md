@@ -2,12 +2,15 @@
 
 This custom integration for Home Assistant allows you to monitor and control your Hoymiles solar inverter system through the Hoymiles Cloud API.
 
-## Release candidate: 1.3.1rc1
+## Release candidate: 1.3.1rc2
 
 This prerelease targets **1.3.1** and builds on 1.3.0. It includes Claude's
 single-microinverter port-count discovery work and further telemetry, privacy,
-and lifecycle fixes. See [candidate notes](docs/release-1.3.1rc1.md).
+and lifecycle fixes. See [candidate notes](docs/release-1.3.1rc2.md).
 
+- RC2 fixes the missing authorization header on burst requests, verified with
+  read-only live cloud samples. Polling still uses the configured integration
+  interval; dedicated fast PV polling is not included.
 - EV charger power now uses the portal's signed live burst endpoint. The old
   `pile_power` field can mirror solar output and is no longer used as charger
   telemetry. An unavailable stream produces an unavailable sensor, not a made-up

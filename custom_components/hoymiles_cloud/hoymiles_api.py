@@ -481,7 +481,9 @@ class HoymilesAPI:
     async def _post_live_burst(self, uri: str) -> dict[str, Any]:
         """Post without sharing the authenticated session's cookie jar."""
         # aiohttp injects CookieJar cookies even when no Cookie header is given.
-        # A separate jar keeps credentials off the signed stream host.
+        # The stream requires account authorization, but must not inherit cookies.
+        uri = self._validate_live_uri(uri)
+        await self._ensure_authenticated()
         isolated = isinstance(self._session, aiohttp.ClientSession)
         session = (
             aiohttp.ClientSession(
@@ -495,7 +497,11 @@ class HoymilesAPI:
             async with session.post(
                 uri,
                 json={"m": 0, "t": 1, "reflux": 0},
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": self._token,
+                },
                 timeout=aiohttp.ClientTimeout(total=10),
                 allow_redirects=False,
             ) as response:

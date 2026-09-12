@@ -19,7 +19,7 @@ def client(responses):
     return api, session
 
 
-def test_live_burst_returns_raw_data_and_omits_auth_headers():
+def test_live_burst_sends_raw_authorization_without_cookies():
     payload = {"es": {"pp": 1, "gp": 2, "bp": 3, "lp": 4, "sp": 5}, "soc": 66, "flow": [], "con": 1, "t": 123, "dly": 10000}
     api, session = client([
         {"status": "0", "data": SIGNED},
@@ -33,7 +33,7 @@ def test_live_burst_returns_raw_data_and_omits_auth_headers():
     for request in session.requests[1:]:
         assert request["kwargs"]["json"] == {"m": 0, "t": 1, "reflux": 0}
         headers = request["kwargs"]["headers"]
-        assert "Authorization" not in headers
+        assert headers["Authorization"] == "private-token"
         assert "Cookie" not in headers
         assert request["kwargs"]["allow_redirects"] is False
 
@@ -48,6 +48,35 @@ def test_live_burst_renews_uri_once_after_failure():
     ])
     assert asyncio.run(api.get_live_data("123")) == {"es": {"pp": 7}}
     assert session.requests[3]["args"][0] == second
+
+
+def test_cached_live_uri_refreshes_expired_account_token():
+    api, session = client([{"data": {"es": {"pp": 7}}}])
+    api._live_uris["123"] = SIGNED
+    api._token_expires_at = 0
+
+    async def authenticate():
+        api._token = "renewed-account-token"
+        api._token_expires_at = 9999999999
+        return True
+
+    api.authenticate = authenticate
+    assert asyncio.run(api.get_live_data("123")) == {"es": {"pp": 7}}
+    assert len(session.requests) == 1
+    assert session.requests[0]["kwargs"]["headers"]["Authorization"] == "renewed-account-token"
+
+
+def test_burst_rejects_unsafe_destination_before_authentication():
+    api, session = client([])
+    api._token_expires_at = 0
+
+    async def authenticate():
+        pytest.fail("An unsafe burst destination must be rejected first")
+
+    api.authenticate = authenticate
+    with pytest.raises(module.LiveDataError):
+        asyncio.run(api._post_live_burst("https://example.com/rds/api/0/burst/get?k=secret"))
+    assert session.requests == []
 
 
 def test_expired_signed_uri_renews_without_account_auth_error():
