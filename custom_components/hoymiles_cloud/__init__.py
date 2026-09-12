@@ -46,6 +46,7 @@ from .data import (
     get_schedule_draft,
     merge_missing_pv_channel_values,
     remove_schedule_entry,
+    seed_missing_pv_channels,
     set_schedule_editor_selection,
     update_schedule_editor_draft,
 )
@@ -677,6 +678,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                     microinverters = static_payload.get("devices", {}).get(
                         "microinverters", {}
+                    )
+                    # Channels the feed omits entirely are seeded from the
+                    # microinverter's own port count, so the fallback below can
+                    # fill them like any other placeholder (issue #39).
+                    pv_indicators = seed_missing_pv_channels(
+                        pv_indicators, microinverters
                     )
                     placeholder_channels = find_placeholder_pv_channels(pv_indicators)
                     if placeholder_channels and len(microinverters) == 1:
