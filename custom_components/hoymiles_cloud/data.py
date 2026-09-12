@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import logging
+import math
 from typing import Any
 
 from .const import (
@@ -1089,40 +1090,66 @@ def _flag_is_set(value: Any) -> bool:
 
 
 def has_ev_charger(station_data: dict[str, Any] | None) -> bool:
-    """Return whether the station advertises a charging pile.
-
-    ``pile_power`` is present in the reflux payload of stations that have no EV
-    charger at all, where it does not carry charger telemetry (issue #64: it
-    mirrored PV power on a station with no vehicle connected). The vendor app
-    gates the charging-pile node on the ``icon_plug``/``icon_ai_plug`` flags, so
-    the same gate is applied here. Payloads that carry neither flag keep the
-    previous behaviour, so stations on older firmware do not lose the entity.
-    """
+    """Return whether a charger is advertised by flags or burst telemetry."""
+    station_data = station_data or {}
+    live = (station_data.get("live_data") or {})
+    icon = live.get("icon") if isinstance(live, dict) else None
+    if isinstance(icon, dict) and "pile" in icon:
+        return _flag_is_set(icon["pile"])
     reflux_data = _reflux_data(station_data)
-    if _optional_float(reflux_data.get("pile_power")) is None:
-        return False
     flags = _ev_charger_flags(reflux_data)
-    if not flags:
-        return True
-    return any(_flag_is_set(flag) for flag in flags)
+    if flags:
+        return any(_flag_is_set(flag) for flag in flags)
+    return False
 
 
-def get_ev_charger_power(station_data: dict[str, Any] | None) -> float | None:
-    """Return EV charger power, or 0 W when no charging pile is active.
+def get_fresh_live_data(
+    station_data: dict[str, Any] | None, *, now: datetime | None = None
+) -> dict[str, Any] | None:
+    """Return a burst only when this coordinator cycle fetched it recently.
 
-    The station keeps reporting a ``pile_power`` value while the icon flags say
-    no pile is connected; that value is not charger telemetry, so it is replaced
-    by an explicit 0 rather than published or dropped. Keeping the entity at 0
-    (instead of unavailable) avoids gaps in long-term statistics.
+    The vendor's ``t`` uses station-local time and ``dly`` is a scheduling hint,
+    so neither can establish freshness without a station timezone.
     """
-    reflux_data = _reflux_data(station_data)
-    power = _optional_float(reflux_data.get("pile_power"))
-    if power is None:
+    live = (station_data or {}).get("live_data")
+    if not isinstance(live, dict):
         return None
-    flags = _ev_charger_flags(reflux_data)
-    if flags and not any(_flag_is_set(flag) for flag in flags):
-        return 0.0
+    fetched_at = _optional_float((station_data or {}).get("live_fetched_at"))
+    if fetched_at is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    age = now.timestamp() - fetched_at
+    max_age = _optional_float((station_data or {}).get("live_max_age")) or 90
+    if age < -30 or age > max_age:
+        return None
+    return live
+
+
+def get_ev_charger_power(
+    station_data: dict[str, Any] | None, *, now: datetime | None = None
+) -> float | None:
+    """Return verified burst charger watts; missing data is never a zero."""
+    if not has_ev_charger(station_data):
+        return None
+    live = get_fresh_live_data(station_data, now=now)
+    es = live.get("es") if live else None
+    if not isinstance(es, dict):
+        return None
+    power = _optional_float(es.get("sp"))
+    if power is None or not math.isfinite(power) or power < 0:
+        return None
     return power
+
+
+def get_grid_connected(station_data: dict[str, Any] | None) -> bool | None:
+    """Read an explicit grid connection flag, if this station provides one."""
+    reflux = _reflux_data(station_data)
+    value = reflux.get("grid_connected")
+    if isinstance(value, bool):
+        return value
+    if value in (0, 1, "0", "1"):
+        return str(value) == "1"
+    return None
 
 
 def has_battery_telemetry(real_time_data: dict[str, Any] | None) -> bool:

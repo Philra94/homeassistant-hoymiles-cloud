@@ -82,6 +82,10 @@ class StationData:
 
     station_info: dict[str, Any] = field(default_factory=dict)
     real_time_data: dict[str, Any] = field(default_factory=dict)
+    live_data: dict[str, Any] = field(default_factory=dict)
+    live_fetched_at: float | None = None
+    live_max_age: int = 90
+    telemetry_available: bool = False
     energy_flow: dict[str, Any] = field(default_factory=dict)
     pv_indicators: dict[str, Any] = field(default_factory=dict)
     grid_indicators: dict[str, Any] = field(default_factory=dict)

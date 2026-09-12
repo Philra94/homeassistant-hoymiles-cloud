@@ -56,8 +56,11 @@ def test_async_get_config_entry_diagnostics_redacts_sensitive_fields() -> None:
     )
 
     diagnostics = asyncio.run(diagnostics_module.async_get_config_entry_diagnostics(hass, entry))
+    assert diagnostics["config_entry"]["title"] == "**REDACTED**"
+    assert diagnostics["config_entry"]["entry_id"] == "**REDACTED**"
+    assert "123" not in diagnostics["coordinator"]["stations"]
 
-    station = diagnostics["coordinator"]["stations"]["123"]
+    station = diagnostics["coordinator"]["stations"]["station_1"]
     assert station["station_info"]["latitude"] == "**REDACTED**"
     assert station["device_inventory"]["batteries"][0]["sn"] == "**REDACTED**"
     assert station["battery_settings"]["mode_data"]["k_8"]["time"] == "<redacted>"
@@ -99,7 +102,7 @@ def test_device_inventory_includes_microinverters() -> None:
         }
     )
 
-    station = diagnostics["coordinator"]["stations"]["123"]
+    station = diagnostics["coordinator"]["stations"]["station_1"]
     inventory = station["device_inventory"]
     assert inventory["microinverters"]["42"]["model_no"] == "HMS-800-2T"
     assert station["device_counts"] == {
@@ -123,7 +126,7 @@ def test_station_summary_includes_telemetry_payloads() -> None:
         }
     )
 
-    station = diagnostics["coordinator"]["stations"]["123"]
+    station = diagnostics["coordinator"]["stations"]["station_1"]
     assert station["pv_indicators"]["list"][0]["key"] == "1_pv_v"
     assert station["real_time_data"]["reflux_station_data"]["bms_soc"] == 55
     assert station["grid_indicators"]["list"][0]["val"] == 12
@@ -150,7 +153,7 @@ def test_added_payloads_are_redacted() -> None:
         }
     )
 
-    station = diagnostics["coordinator"]["stations"]["123"]
+    station = diagnostics["coordinator"]["stations"]["station_1"]
     micro = station["device_inventory"]["microinverters"]["42"]
     assert micro["sn"] == "**REDACTED**"
     assert micro["dtu_sn"] == "**REDACTED**"

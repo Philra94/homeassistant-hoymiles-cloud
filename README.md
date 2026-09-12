@@ -2,6 +2,29 @@
 
 This custom integration for Home Assistant allows you to monitor and control your Hoymiles solar inverter system through the Hoymiles Cloud API.
 
+## Release candidate: 1.3.1rc1
+
+This prerelease targets **1.3.1** and builds on 1.3.0. It includes Claude's
+single-microinverter port-count discovery work and further telemetry, privacy,
+and lifecycle fixes. See [candidate notes](docs/release-1.3.1rc1.md).
+
+- EV charger power now uses the portal's signed live burst endpoint. The old
+  `pile_power` field can mirror solar output and is no longer used as charger
+  telemetry. An unavailable stream produces an unavailable sensor, not a made-up
+  zero. A fresh live zero remains zero when the station advertises a charger.
+- Optional entities can appear after setup as device data becomes available.
+- Battery commands must pass a settings read and readback verification; an
+  unconfirmed write is reported as a failure.
+- Each configured account has separate draft storage. Existing drafts are copied
+  from legacy storage automatically, without deleting the legacy file.
+- Reauthentication updates the same account. Diagnostics redact the account title
+  and signed URLs as well as credentials and identifiers.
+
+Install the prerelease only if you want to test these changes. For manual
+installation, extract the release archive's `custom_components/hoymiles_cloud`
+folder into your Home Assistant configuration and restart Home Assistant.
+Preserve a configuration backup if you need to roll back draft edits.
+
 ## Features
 
 - **Data Monitoring:**
@@ -14,7 +37,7 @@ This custom integration for Home Assistant allows you to monitor and control you
   - Dynamic PV channel discovery based on the indicators returned by the account
   - Per-channel PV voltage/current/power values via the module-data endpoint when the indicators feed only returns placeholders
   - Reported inverter count and battery settings access diagnostics
-  
+
 - **Control Functions:**
   - Set battery operation mode when the account exposes writable battery settings
   - Configure battery reserve state of charge for the modes returned by the account
@@ -102,6 +125,16 @@ After configuration, the integration will create:
 The integration creates PV input sensors from the indicator keys returned by the API. If a system has more than two PV inputs and Hoymiles exposes them in the indicators payload, matching Home Assistant sensors will be created automatically.
 
 The sensors will update every minute by default, but this can be changed in the integration options.
+
+Inventory and battery/relay settings are refreshed less frequently (normally
+every five minutes); a successful control write invalidates the settings cache.
+The live stream is polled at the configured integration interval. Cloud data can still be older than the polling
+interval. No existing historical statistics are rewritten.
+
+Live burst support currently validates the observed EU host (`eurt.hoymiles.com`).
+Other regions may retain aggregate telemetry while the charger sensor remains
+unavailable. Multi-microinverter channel-to-port mappings and per-device
+temperatures remain unsupported where the cloud payload has not been verified.
 
 ### Schedule editor
 
@@ -207,4 +240,4 @@ For bugs or feature requests, please [open an issue on GitHub](https://github.co
 
 ## Disclaimer
 
-This integration is not affiliated with, endorsed by, or connected to Hoymiles Power Electronics Inc. This is a third-party integration developed for personal use. 
+This integration is not affiliated with, endorsed by, or connected to Hoymiles Power Electronics Inc. This is a third-party integration developed for personal use.

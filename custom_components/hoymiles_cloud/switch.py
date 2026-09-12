@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# Coordinator polls and API writes manage their own scheduling.
+PARALLEL_UPDATES = 0
+
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
@@ -11,6 +14,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
+from .discovery import invalidate_control_cache, register_discovery
 from .const import DOMAIN
 from .data import relay_settings_readable, relay_settings_writable, relay_settings_enabled
 from .device import build_station_device_info
@@ -30,16 +34,20 @@ async def async_setup_entry(
     """Set up Hoymiles Cloud switches."""
     runtime_data = hass.data[DOMAIN][entry.entry_id]
     coordinator = runtime_data["coordinator"]
+    coordinator.invalidate_control_cache = runtime_data["invalidate_control_cache"]
     stations = runtime_data["stations"]
     api = runtime_data["api"]
 
-    entities: list[SwitchEntity] = []
-    for station_id, station_name in stations.items():
-        station_data = get_station_data(coordinator, station_id)
-        if relay_settings_readable(station_data.get("relay_settings")):
-            entities.append(HoymilesRelaySwitch(coordinator, api, station_id, station_name))
+    def build_entities() -> list:
+        entities: list[SwitchEntity] = []
+        for station_id, station_name in stations.items():
+            station_data = get_station_data(coordinator, station_id)
+            if relay_settings_readable(station_data.get("relay_settings")):
+                entities.append(HoymilesRelaySwitch(coordinator, api, station_id, station_name))
 
-    async_add_entities(entities)
+        return entities
+
+    register_discovery(coordinator, entry, async_add_entities, build_entities)
 
 
 class HoymilesRelaySwitch(CoordinatorEntity, SwitchEntity):
@@ -77,11 +85,13 @@ class HoymilesRelaySwitch(CoordinatorEntity, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable relay automation."""
         if await self._api.set_relay_enabled(self._station_id, True):
+            invalidate_control_cache(self.coordinator, self._station_id)
             await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable relay automation."""
         if await self._api.set_relay_enabled(self._station_id, False):
+            invalidate_control_cache(self.coordinator, self._station_id)
             await self.coordinator.async_request_refresh()
 
     @property

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# Coordinator polls and API writes manage their own scheduling.
+PARALLEL_UPDATES = 0
+
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,6 +33,7 @@ from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from .discovery import register_discovery
 from .const import BATTERY_MODES, DOMAIN, METER_LOCATION_NAMES
 from .data import (
     battery_settings_readable,
@@ -66,6 +70,12 @@ from .schedule_editor import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_NON_TELEMETRY_SENSOR_KEYS = {
+    "electricity_buy_price", "electricity_sell_price", "ai_status",
+    "ai_compound_mode", "firmware_status", "reported_inverter_count",
+    "battery_settings_access",
+}
 
 
 def safe_int_convert(value: Any) -> int | None:
@@ -467,7 +477,7 @@ STATION_SENSORS: list[HoymilesSensorDescription] = [
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=2,
         exists_fn=has_ev_charger,
-        available_fn=lambda data: safe_float_convert(get_reflux_data(data).get("pile_power")) is not None,
+        available_fn=lambda data: get_ev_charger_power(data) is not None,
         value_fn=get_ev_charger_power,
     ),
     HoymilesSensorDescription(
@@ -647,225 +657,229 @@ async def async_setup_entry(
     coordinator = runtime_data["coordinator"]
     stations = runtime_data["stations"]
 
-    entities: list[SensorEntity] = []
-    for station_id, station_name in stations.items():
-        station_data = get_station_data(coordinator, station_id)
+    def build_entities() -> list[SensorEntity]:
+        """Add newly discovered station, device and PV entities once."""
+        entities: list[SensorEntity] = []
+        for station_id, station_name in stations.items():
+            station_data = get_station_data(coordinator, station_id)
 
-        for description in STATION_SENSORS:
-            if description.exists_fn and not description.exists_fn(station_data):
-                continue
-            entities.append(
-                HoymilesAggregateSensor(
-                    coordinator=coordinator,
-                    description=description,
-                    station_id=station_id,
-                    station_name=station_name,
-                )
-            )
-
-        if battery_settings_readable(station_data.get("battery_settings", {})):
-            entities.append(HoymilesBatteryModeSensor(coordinator, station_id, station_name))
-
-        if station_data.get("schedule_editor", {}).get("available_modes"):
-            entities.extend(
-                [
-                    HoymilesScheduleEditorModeSensor(coordinator, station_id, station_name),
-                    HoymilesScheduleSummarySensor(coordinator, station_id, station_name, 2),
-                    HoymilesScheduleSummarySensor(coordinator, station_id, station_name, 8),
-                    HoymilesScheduleCountSensor(coordinator, station_id, station_name, 2),
-                    HoymilesScheduleCountSensor(coordinator, station_id, station_name, 8),
-                    HoymilesScheduleEditorValidationSensor(coordinator, station_id, station_name),
-                    HoymilesScheduleEditorDirtySensor(coordinator, station_id, station_name),
-                ]
-            )
-
-        for channel in discover_pv_channels(station_data.get("pv_indicators", {})):
-            entities.extend(
-                [
-                    HoymilesPVChannelSensor(coordinator, station_id, station_name, channel, "v"),
-                    HoymilesPVChannelSensor(coordinator, station_id, station_name, channel, "i"),
-                    HoymilesPVChannelSensor(coordinator, station_id, station_name, channel, "p"),
-                ]
-            )
-
-        for entity_key, label, indicator_key, unit, device_class, precision in GRID_INDICATOR_SPECS:
-            if has_grid_indicator(station_data, indicator_key):
+            for description in STATION_SENSORS:
+                if description.exists_fn and not description.exists_fn(station_data):
+                    continue
                 entities.append(
-                    HoymilesGridIndicatorSensor(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        entity_key,
-                        label,
-                        indicator_key,
-                        unit,
-                        device_class,
-                        precision,
+                    HoymilesAggregateSensor(
+                        coordinator=coordinator,
+                        description=description,
+                        station_id=station_id,
+                        station_name=station_name,
                     )
                 )
 
-        for inverter in station_data.get("devices", {}).get("inverters", []):
-            entities.extend(
-                [
-                    HoymilesDeviceAttributeSensor(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        "inverters",
-                        inverter,
-                        "model",
-                        "Inverter Model",
-                        "model_no",
-                        build_inverter_device_info,
-                    ),
-                    HoymilesDeviceAttributeSensor(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        "inverters",
-                        inverter,
-                        "firmware",
-                        "Inverter Firmware Version",
-                        "soft_ver",
-                        build_inverter_device_info,
-                        entity_category=EntityCategory.DIAGNOSTIC,
-                        enabled_default=False,
-                    ),
-                    HoymilesDeviceAttributeSensor(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        "inverters",
-                        inverter,
-                        "hardware",
-                        "Inverter Hardware Version",
-                        "hard_ver",
-                        build_inverter_device_info,
-                        entity_category=EntityCategory.DIAGNOSTIC,
-                        enabled_default=False,
-                    ),
-                ]
-            )
+            if battery_settings_readable(station_data.get("battery_settings", {})):
+                entities.append(HoymilesBatteryModeSensor(coordinator, station_id, station_name))
 
-        for battery in station_data.get("devices", {}).get("batteries", []):
-            entities.extend(
-                [
-                    HoymilesDeviceAttributeSensor(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        "batteries",
-                        battery,
-                        "capacity",
-                        "Battery Capacity",
-                        "cap",
-                        build_battery_device_info,
-                    ),
-                    HoymilesDeviceAttributeSensor(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        "batteries",
-                        battery,
-                        "bms_type",
-                        "Battery BMS Type",
-                        "bms_type",
-                        build_battery_device_info,
-                        entity_category=EntityCategory.DIAGNOSTIC,
-                    ),
-                    HoymilesDeviceAttributeSensor(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        "batteries",
-                        battery,
-                        "firmware",
-                        "Battery Firmware Version",
-                        "soft_ver",
-                        build_battery_device_info,
-                        entity_category=EntityCategory.DIAGNOSTIC,
-                        enabled_default=False,
-                    ),
-                    HoymilesDeviceAttributeSensor(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        "batteries",
-                        battery,
-                        "hardware",
-                        "Battery Hardware Version",
-                        "hard_ver",
-                        build_battery_device_info,
-                        entity_category=EntityCategory.DIAGNOSTIC,
-                        enabled_default=False,
-                    ),
-                ]
-            )
+            if station_data.get("schedule_editor", {}).get("available_modes"):
+                entities.extend(
+                    [
+                        HoymilesScheduleEditorModeSensor(coordinator, station_id, station_name),
+                        HoymilesScheduleSummarySensor(coordinator, station_id, station_name, 2),
+                        HoymilesScheduleSummarySensor(coordinator, station_id, station_name, 8),
+                        HoymilesScheduleCountSensor(coordinator, station_id, station_name, 2),
+                        HoymilesScheduleCountSensor(coordinator, station_id, station_name, 8),
+                        HoymilesScheduleEditorValidationSensor(coordinator, station_id, station_name),
+                        HoymilesScheduleEditorDirtySensor(coordinator, station_id, station_name),
+                    ]
+                )
 
-        for meter in station_data.get("devices", {}).get("meters", []):
-            entities.extend(
-                [
-                    HoymilesDeviceAttributeSensor(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        "meters",
-                        meter,
-                        "location",
-                        "Meter Location",
-                        "location",
-                        build_meter_device_info,
-                        value_transform=lambda value: METER_LOCATION_NAMES.get(value, str(value)),
-                        entity_category=EntityCategory.DIAGNOSTIC,
-                    ),
-                    HoymilesDeviceAttributeSensor(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        "meters",
-                        meter,
-                        "ct_gain",
-                        "Meter CT Gain",
-                        "ct_gain",
-                        build_meter_device_info,
-                        value_transform=safe_float_convert,
-                        entity_category=EntityCategory.DIAGNOSTIC,
-                    ),
-                ]
-            )
+            for channel in discover_pv_channels(station_data.get("pv_indicators", {})):
+                entities.extend(
+                    [
+                        HoymilesPVChannelSensor(coordinator, station_id, station_name, channel, "v"),
+                        HoymilesPVChannelSensor(coordinator, station_id, station_name, channel, "i"),
+                        HoymilesPVChannelSensor(coordinator, station_id, station_name, channel, "p"),
+                    ]
+                )
 
-        for dtu in station_data.get("devices", {}).get("dtus", []):
-            entities.extend(
-                [
-                    HoymilesDeviceAttributeSensor(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        "dtus",
-                        dtu,
-                        "serial",
-                        "DTU Serial",
-                        "sn",
-                        build_dtu_device_info,
-                        entity_category=EntityCategory.DIAGNOSTIC,
-                        enabled_default=False,
-                    ),
-                    HoymilesDeviceAttributeSensor(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        "dtus",
-                        dtu,
-                        "device_type",
-                        "DTU Device Type",
-                        "type",
-                        build_dtu_device_info,
-                        entity_category=EntityCategory.DIAGNOSTIC,
-                    ),
-                ]
-            )
+            for entity_key, label, indicator_key, unit, device_class, precision in GRID_INDICATOR_SPECS:
+                if has_grid_indicator(station_data, indicator_key):
+                    entities.append(
+                        HoymilesGridIndicatorSensor(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            entity_key,
+                            label,
+                            indicator_key,
+                            unit,
+                            device_class,
+                            precision,
+                        )
+                    )
 
-    async_add_entities(entities)
+            for inverter in station_data.get("devices", {}).get("inverters", []):
+                entities.extend(
+                    [
+                        HoymilesDeviceAttributeSensor(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            "inverters",
+                            inverter,
+                            "model",
+                            "Inverter Model",
+                            "model_no",
+                            build_inverter_device_info,
+                        ),
+                        HoymilesDeviceAttributeSensor(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            "inverters",
+                            inverter,
+                            "firmware",
+                            "Inverter Firmware Version",
+                            "soft_ver",
+                            build_inverter_device_info,
+                            entity_category=EntityCategory.DIAGNOSTIC,
+                            enabled_default=False,
+                        ),
+                        HoymilesDeviceAttributeSensor(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            "inverters",
+                            inverter,
+                            "hardware",
+                            "Inverter Hardware Version",
+                            "hard_ver",
+                            build_inverter_device_info,
+                            entity_category=EntityCategory.DIAGNOSTIC,
+                            enabled_default=False,
+                        ),
+                    ]
+                )
+
+            for battery in station_data.get("devices", {}).get("batteries", []):
+                entities.extend(
+                    [
+                        HoymilesDeviceAttributeSensor(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            "batteries",
+                            battery,
+                            "capacity",
+                            "Battery Capacity",
+                            "cap",
+                            build_battery_device_info,
+                        ),
+                        HoymilesDeviceAttributeSensor(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            "batteries",
+                            battery,
+                            "bms_type",
+                            "Battery BMS Type",
+                            "bms_type",
+                            build_battery_device_info,
+                            entity_category=EntityCategory.DIAGNOSTIC,
+                        ),
+                        HoymilesDeviceAttributeSensor(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            "batteries",
+                            battery,
+                            "firmware",
+                            "Battery Firmware Version",
+                            "soft_ver",
+                            build_battery_device_info,
+                            entity_category=EntityCategory.DIAGNOSTIC,
+                            enabled_default=False,
+                        ),
+                        HoymilesDeviceAttributeSensor(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            "batteries",
+                            battery,
+                            "hardware",
+                            "Battery Hardware Version",
+                            "hard_ver",
+                            build_battery_device_info,
+                            entity_category=EntityCategory.DIAGNOSTIC,
+                            enabled_default=False,
+                        ),
+                    ]
+                )
+
+            for meter in station_data.get("devices", {}).get("meters", []):
+                entities.extend(
+                    [
+                        HoymilesDeviceAttributeSensor(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            "meters",
+                            meter,
+                            "location",
+                            "Meter Location",
+                            "location",
+                            build_meter_device_info,
+                            value_transform=lambda value: METER_LOCATION_NAMES.get(value, str(value)),
+                            entity_category=EntityCategory.DIAGNOSTIC,
+                        ),
+                        HoymilesDeviceAttributeSensor(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            "meters",
+                            meter,
+                            "ct_gain",
+                            "Meter CT Gain",
+                            "ct_gain",
+                            build_meter_device_info,
+                            value_transform=safe_float_convert,
+                            entity_category=EntityCategory.DIAGNOSTIC,
+                        ),
+                    ]
+                )
+
+            for dtu in station_data.get("devices", {}).get("dtus", []):
+                entities.extend(
+                    [
+                        HoymilesDeviceAttributeSensor(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            "dtus",
+                            dtu,
+                            "serial",
+                            "DTU Serial",
+                            "sn",
+                            build_dtu_device_info,
+                            entity_category=EntityCategory.DIAGNOSTIC,
+                            enabled_default=False,
+                        ),
+                        HoymilesDeviceAttributeSensor(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            "dtus",
+                            dtu,
+                            "device_type",
+                            "DTU Device Type",
+                            "type",
+                            build_dtu_device_info,
+                            entity_category=EntityCategory.DIAGNOSTIC,
+                        ),
+                    ]
+                )
+
+        return entities
+
+    register_discovery(coordinator, entry, async_add_entities, build_entities)
 
 
 class HoymilesBaseSensor(CoordinatorEntity, SensorEntity):
@@ -950,10 +964,16 @@ class HoymilesAggregateSensor(HoymilesBaseSensor):
         """Return if entity is available."""
         if not self.coordinator.last_update_success:
             return False
+        station_data = self._get_station_data()
+        if (
+            station_data.get("telemetry_available") is False
+            and self.entity_description.key not in _NON_TELEMETRY_SENSOR_KEYS
+        ):
+            return False
         available_fn = self.entity_description.available_fn or self.entity_description.exists_fn
         if available_fn:
-            return available_fn(self._get_station_data())
-        return bool(self._get_station_data())
+            return available_fn(station_data)
+        return bool(station_data)
 
 
 class HoymilesBatteryModeSensor(HoymilesBaseSensor):

@@ -1,6 +1,9 @@
 """Button entities for the Hoymiles schedule editor."""
 from __future__ import annotations
 
+# Coordinator polls and API writes manage their own scheduling.
+PARALLEL_UPDATES = 0
+
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -8,6 +11,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
+from .discovery import register_discovery
 from .const import DOMAIN
 from .schedule_editor import build_device_info, get_selected_editor_mode, get_station_data
 
@@ -22,57 +26,60 @@ async def async_setup_entry(
     coordinator = runtime_data["coordinator"]
     stations = runtime_data["stations"]
 
-    entities = []
-    for station_id, station_name in stations.items():
-        station_data = coordinator.data.get(station_id, {}) if coordinator.data else {}
-        if not station_data.get("schedule_editor", {}).get("available_modes"):
-            continue
-        entities.extend(
-            [
-                HoymilesScheduleButton(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    runtime_data["load_schedule_draft"],
-                    "load_schedule_draft",
-                    "Load Live Schedule Draft",
-                ),
-                HoymilesScheduleButton(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    runtime_data["apply_schedule_draft"],
-                    "apply_schedule_draft",
-                    "Apply Schedule Draft",
-                ),
-                HoymilesScheduleButton(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    runtime_data["reset_schedule_draft"],
-                    "reset_schedule_draft",
-                    "Discard Schedule Draft",
-                ),
-                HoymilesScheduleButton(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    runtime_data["add_schedule_entry"],
-                    "add_schedule_entry",
-                    "Add Schedule Entry",
-                ),
-                HoymilesScheduleButton(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    runtime_data["remove_schedule_entry"],
-                    "remove_schedule_entry",
-                    "Remove Schedule Entry",
-                ),
-            ]
-        )
+    def build_entities() -> list:
+        entities = []
+        for station_id, station_name in stations.items():
+            station_data = coordinator.data.get(station_id, {}) if coordinator.data else {}
+            if not station_data.get("schedule_editor", {}).get("available_modes"):
+                continue
+            entities.extend(
+                [
+                    HoymilesScheduleButton(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        runtime_data["load_schedule_draft"],
+                        "load_schedule_draft",
+                        "Load Live Schedule Draft",
+                    ),
+                    HoymilesScheduleButton(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        runtime_data["apply_schedule_draft"],
+                        "apply_schedule_draft",
+                        "Apply Schedule Draft",
+                    ),
+                    HoymilesScheduleButton(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        runtime_data["reset_schedule_draft"],
+                        "reset_schedule_draft",
+                        "Discard Schedule Draft",
+                    ),
+                    HoymilesScheduleButton(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        runtime_data["add_schedule_entry"],
+                        "add_schedule_entry",
+                        "Add Schedule Entry",
+                    ),
+                    HoymilesScheduleButton(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        runtime_data["remove_schedule_entry"],
+                        "remove_schedule_entry",
+                        "Remove Schedule Entry",
+                    ),
+                ]
+            )
 
-    async_add_entities(entities)
+        return entities
+
+    register_discovery(coordinator, entry, async_add_entities, build_entities)
 
 
 class HoymilesScheduleButton(CoordinatorEntity, ButtonEntity):

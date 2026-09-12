@@ -724,34 +724,34 @@ def test_ev_charger_hidden_when_no_pile_is_advertised() -> None:
 
 
 def test_ev_charger_power_reports_zero_while_no_pile_is_connected() -> None:
-    """The mirrored value is replaced by 0 W, not published or dropped."""
+    """The mirrored legacy value is never interpreted as a real zero."""
     station = _station_with_reflux(pile_power="742", icon_plug=0, icon_ai_plug=0)
 
-    assert get_ev_charger_power(station) == 0.0
+    assert get_ev_charger_power(station) is None
 
 
 def test_ev_charger_exposed_when_a_pile_is_advertised() -> None:
-    """Either icon flag is enough to treat pile_power as charger telemetry."""
+    """Icon flags expose the entity but do not validate legacy pile_power."""
     plain = _station_with_reflux(pile_power="3600", icon_plug=1, icon_ai_plug=0)
     ai = _station_with_reflux(pile_power="3600", icon_plug="0", icon_ai_plug="1")
 
     assert has_ev_charger(plain) is True
-    assert get_ev_charger_power(plain) == 3600.0
+    assert get_ev_charger_power(plain) is None
     assert has_ev_charger(ai) is True
-    assert get_ev_charger_power(ai) == 3600.0
+    assert get_ev_charger_power(ai) is None
 
 
 def test_ev_charger_keeps_legacy_behaviour_without_icon_flags() -> None:
-    """Payloads that carry neither flag must not lose the entity."""
+    """A legacy pile_power alone cannot establish charger support."""
     station = _station_with_reflux(pile_power="3600")
 
-    assert has_ev_charger(station) is True
-    assert get_ev_charger_power(station) == 3600.0
+    assert has_ev_charger(station) is False
+    assert get_ev_charger_power(station) is None
 
 
 def test_ev_charger_absent_without_pile_power() -> None:
-    """No pile_power at all means there is nothing to report."""
-    assert has_ev_charger(_station_with_reflux(icon_plug=1)) is False
+    """An advertised pile can have temporarily missing live power."""
+    assert has_ev_charger(_station_with_reflux(icon_plug=1)) is True
     assert has_ev_charger(_station_with_reflux(pile_power="-")) is False
     assert get_ev_charger_power(_station_with_reflux()) is None
 
@@ -768,3 +768,55 @@ def test_capabilities_report_ev_charger_availability() -> None:
     )
 
     assert capabilities["ev_charger_available"] is False
+
+
+def test_burst_charger_power_uses_es_sp_with_fetch_freshness() -> None:
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
+    station = _station_with_reflux(pile_power="742", icon_plug=1)
+    station["live_data"] = {"es": {"pp": 742, "sp": 0}, "t": "station local", "dly": 10000}
+    station["live_fetched_at"] = now.timestamp()
+    assert has_ev_charger(station) is True
+    assert get_ev_charger_power(station, now=now) == 0.0
+    station["live_data"]["es"]["sp"] = 3600
+    assert get_ev_charger_power(station, now=now) == 3600.0
+    station["live_fetched_at"] -= 91
+    assert get_ev_charger_power(station, now=now) is None
+    station["live_fetched_at"] = None
+    assert get_ev_charger_power(station, now=now) is None
+
+
+def test_grid_connected_needs_explicit_signal() -> None:
+    assert data_module.get_grid_connected(_station_with_reflux(grid_power=123)) is None
+    assert data_module.get_grid_connected(_station_with_reflux(grid_connected=0)) is False
+    assert data_module.get_grid_connected(_station_with_reflux(grid_connected=1)) is True
+
+
+def test_live_icon_overrides_legacy_flags_and_rejects_invalid_power() -> None:
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
+    station = _station_with_reflux(icon_plug=0, pile_power=742)
+    station.update(live_data={"icon": {"pile": 1}, "es": {"sp": 2500}}, live_fetched_at=now.timestamp())
+    assert has_ev_charger(station) is True
+    assert get_ev_charger_power(station, now=now) == 2500
+    for value in (-1, float("nan"), float("inf"), "-"):
+        station["live_data"]["es"]["sp"] = value
+        assert get_ev_charger_power(station, now=now) is None
+    station["live_data"]["icon"]["pile"] = 0
+    assert has_ev_charger(station) is False
+    station["live_data"]["es"]["sp"] = 2500
+    assert get_ev_charger_power(station, now=now) is None
+    station["live_data"]["es"]["sp"] = 0
+    assert get_ev_charger_power(station, now=now) is None
+
+
+def test_live_freshness_respects_configured_scan_interval() -> None:
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
+    station = {"live_data": {"icon": {"pile": 1}, "es": {"sp": 50}}, "live_fetched_at": now.timestamp() - 300, "live_max_age": 600}
+    assert get_ev_charger_power(station, now=now) == 50
+    station["live_fetched_at"] = now.timestamp() - 601
+    assert get_ev_charger_power(station, now=now) is None
