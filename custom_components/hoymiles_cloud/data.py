@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import logging
+import math
 from typing import Any
 
 from .const import (
@@ -14,6 +15,7 @@ from .const import (
     BATTERY_MODE_IDS,
     BATTERY_MODE_TIME_OF_USE,
     BATTERY_SCHEDULE_MODE_IDS,
+    EV_CHARGER_FLAG_KEYS,
     INDICATOR_FLOW_STAT_TYPE_BATTERY,
     METER_LOCATION_NAMES,
     MODULE_DATA_MAX_AGE_MINUTES,
@@ -752,6 +754,80 @@ def find_placeholder_pv_channels(pv_indicators: dict[str, Any] | None) -> list[i
     return channels
 
 
+def get_microinverter_port_count(microinverter: Any) -> int | None:
+    """Return the port count a microinverter detail payload declares.
+
+    The detail payload from ``/dev/micro/find`` carries ``rule.port`` — the
+    number of DC inputs the hardware has. This is the only field we fetch that
+    states a port count, and it is per-device, matching the ``port`` the
+    module-data endpoint takes.
+    """
+    if not isinstance(microinverter, dict):
+        return None
+    rule = microinverter.get("rule")
+    if not isinstance(rule, dict):
+        return None
+    port = rule.get("port")
+    if isinstance(port, str):
+        port = port.strip()
+        if not port.isdigit():
+            return None
+        port = int(port)
+    if isinstance(port, bool) or not isinstance(port, int) or port < 1:
+        return None
+    return port
+
+
+def expected_pv_channels(microinverters: dict[str, Any] | None) -> list[int]:
+    """Return the PV channels a station's microinverter inventory implies.
+
+    Some firmware omits a channel from the indicators feed entirely rather than
+    reporting it as a placeholder (issue #39), so the channel list cannot be
+    derived from that feed alone. The microinverter's own port count can carry
+    it instead, but only where ``channel N == port N`` is sound — that is, on a
+    single-microinverter station, the same assumption the module-data fallback
+    already rests on. With several microinverters the station-level channel
+    numbering is unknown (#56), so nothing is claimed rather than guessed.
+    """
+    if not microinverters or len(microinverters) != 1:
+        return []
+    port_count = get_microinverter_port_count(next(iter(microinverters.values())))
+    if port_count is None:
+        return []
+    return list(range(1, port_count + 1))
+
+
+def seed_missing_pv_channels(
+    pv_indicators: dict[str, Any] | None,
+    microinverters: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Add placeholder v/i/p entries for channels the feed never reports.
+
+    Seeding turns "channel absent" into "channel present but unset", which is
+    the state ``find_placeholder_pv_channels`` already looks for, so the
+    module-data fallback can fill it like any other placeholder. A channel that
+    the fallback cannot fill stays unset and reads as unknown — visibly missing
+    rather than silently wrong.
+    """
+    if not pv_indicators or not pv_indicators.get("list"):
+        # An empty feed means the fetch failed, not that channels are missing.
+        return pv_indicators or {}
+    expected = expected_pv_channels(microinverters)
+    if not expected:
+        return pv_indicators
+    known = set(discover_pv_channels(pv_indicators))
+    missing = [channel for channel in expected if channel not in known]
+    if not missing:
+        return pv_indicators
+
+    seeded = deepcopy(pv_indicators)
+    items = seeded.setdefault("list", [])
+    for channel in missing:
+        for metric in ("v", "i", "p"):
+            items.append({"key": f"{channel}_pv_{metric}", "val": None})
+    return seeded
+
+
 def _replace_indicator_value(
     items: list[dict[str, Any]],
     key: str,
@@ -1000,6 +1076,82 @@ def is_battery_charging(station_data: dict[str, Any] | None) -> bool | None:
     return None
 
 
+def _ev_charger_flags(reflux_data: dict[str, Any]) -> list[Any]:
+    """Return the charging-pile icon flags the payload actually carries."""
+    return [reflux_data[key] for key in EV_CHARGER_FLAG_KEYS if key in reflux_data]
+
+
+def _flag_is_set(value: Any) -> bool:
+    """Return whether an API icon flag is set, tolerating string encodings."""
+    number = _optional_float(value)
+    if number is None:
+        return bool(value)
+    return number != 0
+
+
+def has_ev_charger(station_data: dict[str, Any] | None) -> bool:
+    """Return whether a charger is advertised by flags or burst telemetry."""
+    station_data = station_data or {}
+    live = (station_data.get("live_data") or {})
+    icon = live.get("icon") if isinstance(live, dict) else None
+    if isinstance(icon, dict) and "pile" in icon:
+        return _flag_is_set(icon["pile"])
+    reflux_data = _reflux_data(station_data)
+    flags = _ev_charger_flags(reflux_data)
+    if flags:
+        return any(_flag_is_set(flag) for flag in flags)
+    return False
+
+
+def get_fresh_live_data(
+    station_data: dict[str, Any] | None, *, now: datetime | None = None
+) -> dict[str, Any] | None:
+    """Return a burst only when this coordinator cycle fetched it recently.
+
+    The vendor's ``t`` uses station-local time and ``dly`` is a scheduling hint,
+    so neither can establish freshness without a station timezone.
+    """
+    live = (station_data or {}).get("live_data")
+    if not isinstance(live, dict):
+        return None
+    fetched_at = _optional_float((station_data or {}).get("live_fetched_at"))
+    if fetched_at is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    age = now.timestamp() - fetched_at
+    max_age = _optional_float((station_data or {}).get("live_max_age")) or 90
+    if age < -30 or age > max_age:
+        return None
+    return live
+
+
+def get_ev_charger_power(
+    station_data: dict[str, Any] | None, *, now: datetime | None = None
+) -> float | None:
+    """Return verified burst charger watts; missing data is never a zero."""
+    if not has_ev_charger(station_data):
+        return None
+    live = get_fresh_live_data(station_data, now=now)
+    es = live.get("es") if live else None
+    if not isinstance(es, dict):
+        return None
+    power = _optional_float(es.get("sp"))
+    if power is None or not math.isfinite(power) or power < 0:
+        return None
+    return power
+
+
+def get_grid_connected(station_data: dict[str, Any] | None) -> bool | None:
+    """Read an explicit grid connection flag, if this station provides one."""
+    reflux = _reflux_data(station_data)
+    value = reflux.get("grid_connected")
+    if isinstance(value, bool):
+        return value
+    if value in (0, 1, "0", "1"):
+        return str(value) == "1"
+    return None
+
+
 def has_battery_telemetry(real_time_data: dict[str, Any] | None) -> bool:
     """Return whether real-time data contains battery telemetry."""
     reflux_data = (real_time_data or {}).get("reflux_station_data", {})
@@ -1042,6 +1194,7 @@ def build_station_capabilities(
 
     return {
         "battery_telemetry": has_battery_telemetry(real_time_data),
+        "ev_charger_available": has_ev_charger({"real_time_data": real_time_data or {}}),
         "battery_settings_readable": battery_settings_readable(battery_settings),
         "battery_settings_writable": battery_settings_writable(battery_settings),
         "relay_settings_readable": relay_settings_readable(relay_settings),
@@ -1056,6 +1209,11 @@ def build_station_capabilities(
         "ai_available": bool(ai_status),
         "firmware_available": bool(firmware),
         "pv_channels": pv_channels,
+        "expected_pv_channels": expected_pv_channels(microinverters_data),
+        "microinverter_port_counts": {
+            str(mi_id): get_microinverter_port_count(micro)
+            for mi_id, micro in (microinverters_data or {}).items()
+        },
         "microinverter_details_available": bool(microinverters_data),
         "microinverter_detail_count": len(microinverters_data or {}),
         "has_dtu": bool(devices.get("dtus")),

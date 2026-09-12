@@ -12,15 +12,20 @@ build_schedule_editor_state = data_module.build_schedule_editor_state
 build_schedule_payload_from_draft = data_module.build_schedule_payload_from_draft
 build_station_capabilities = data_module.build_station_capabilities
 discover_pv_channels = data_module.discover_pv_channels
+expected_pv_channels = data_module.expected_pv_channels
 find_placeholder_pv_channels = data_module.find_placeholder_pv_channels
 get_allowed_battery_modes = data_module.get_allowed_battery_modes
 get_battery_flow_direction = data_module.get_battery_flow_direction
 get_schedule_modes = data_module.get_schedule_modes
+get_microinverter_port_count = data_module.get_microinverter_port_count
+get_ev_charger_power = data_module.get_ev_charger_power
 get_signed_battery_power = data_module.get_signed_battery_power
+has_ev_charger = data_module.has_ev_charger
 is_battery_charging = data_module.is_battery_charging
 latest_module_values = data_module.latest_module_values
 merge_missing_pv_channel_values = data_module.merge_missing_pv_channel_values
 relay_settings_enabled = data_module.relay_settings_enabled
+seed_missing_pv_channels = data_module.seed_missing_pv_channels
 validate_schedule_draft = data_module.validate_schedule_draft
 
 
@@ -264,6 +269,126 @@ def test_find_placeholder_pv_channels_ignores_channels_with_real_values() -> Non
     }
 
     assert find_placeholder_pv_channels(pv_indicators) == []
+
+
+# --- Port-count derived channels (issue #39) ---------------------------------
+
+# An HMS-800-2WB reported by the issue: two physical ports, but the indicators
+# feed only ever returns keys for channel 1.
+HMS_800_2WB = {
+    "33820520": {
+        "id": 33820520,
+        "init_hard_no": "HMS-800-2WB",
+        "rule": {"dev_type": 3, "port": 2},
+    }
+}
+ONE_CHANNEL_FEED = {
+    "pv_total": 1,
+    "list": [
+        {"key": "pv_p_total", "val": 26.1},
+        {"key": "1_pv_v", "val": 32.7},
+        {"key": "1_pv_i", "val": 0.8},
+        {"key": "1_pv_p", "val": 26.1},
+    ],
+}
+
+
+def test_get_microinverter_port_count_reads_rule_port() -> None:
+    """The port count comes from rule.port in the detail payload."""
+    assert get_microinverter_port_count(HMS_800_2WB["33820520"]) == 2
+    assert get_microinverter_port_count({"rule": {"port": "4"}}) == 4
+
+
+@pytest.mark.parametrize(
+    "micro",
+    [
+        None,
+        {},
+        {"rule": None},
+        {"rule": {}},
+        {"rule": {"port": 0}},
+        {"rule": {"port": -1}},
+        {"rule": {"port": "two"}},
+        {"rule": {"port": True}},
+    ],
+)
+def test_get_microinverter_port_count_rejects_unusable_values(micro) -> None:
+    """Anything that is not a positive integer port count yields None."""
+    assert get_microinverter_port_count(micro) is None
+
+
+def test_expected_pv_channels_from_single_microinverter() -> None:
+    """A single two-port microinverter implies channels 1 and 2."""
+    assert expected_pv_channels(HMS_800_2WB) == [1, 2]
+
+
+def test_expected_pv_channels_declines_multi_microinverter_stations() -> None:
+    """Channel-to-port mapping is unknown with several devices (#56)."""
+    microinverters = {
+        "1": {"rule": {"port": 2}},
+        "2": {"rule": {"port": 2}},
+    }
+
+    assert expected_pv_channels(microinverters) == []
+
+
+def test_expected_pv_channels_without_port_count() -> None:
+    """A detail payload that states no port count claims nothing."""
+    assert expected_pv_channels({"1": {}}) == []
+    assert expected_pv_channels({}) == []
+    assert expected_pv_channels(None) == []
+
+
+def test_seed_missing_pv_channels_adds_the_omitted_channel() -> None:
+    """The channel the feed never reports becomes a fillable placeholder."""
+    seeded = seed_missing_pv_channels(ONE_CHANNEL_FEED, HMS_800_2WB)
+
+    assert discover_pv_channels(seeded) == [1, 2]
+    # Channel 1 keeps its real values; only channel 2 is a placeholder.
+    assert find_placeholder_pv_channels(seeded) == [2]
+
+
+def test_seed_missing_pv_channels_does_not_mutate_the_feed() -> None:
+    """Seeding returns a copy, leaving the fetched payload untouched."""
+    seed_missing_pv_channels(ONE_CHANNEL_FEED, HMS_800_2WB)
+
+    assert discover_pv_channels(ONE_CHANNEL_FEED) == [1]
+
+
+def test_seed_missing_pv_channels_is_a_noop_when_the_feed_is_complete() -> None:
+    """A feed already reporting every port is returned unchanged."""
+    feed = {
+        "list": [
+            {"key": "1_pv_p", "val": 26.1},
+            {"key": "2_pv_p", "val": 30.4},
+        ]
+    }
+
+    assert seed_missing_pv_channels(feed, HMS_800_2WB) is feed
+
+
+def test_seed_missing_pv_channels_ignores_an_empty_feed() -> None:
+    """A failed indicators fetch must not invent channels."""
+    assert seed_missing_pv_channels({}, HMS_800_2WB) == {}
+    assert seed_missing_pv_channels(None, HMS_800_2WB) == {}
+    assert seed_missing_pv_channels({"list": []}, HMS_800_2WB) == {"list": []}
+
+
+def test_seeded_channel_is_filled_by_module_data() -> None:
+    """End to end: an omitted channel is seeded and then filled (#39)."""
+    seeded = seed_missing_pv_channels(ONE_CHANNEL_FEED, HMS_800_2WB)
+
+    merged = merge_missing_pv_channel_values(
+        seeded,
+        {2: {"MODULE_V": 33.1, "MODULE_I": 0.9, "MODULE_POWER": 29.8}},
+    )
+
+    values = {item["key"]: item["val"] for item in merged["list"]}
+    assert values["2_pv_v"] == 33.1
+    assert values["2_pv_i"] == 0.9
+    assert values["2_pv_p"] == 29.8
+    # Channel 1's real readings are left alone.
+    assert values["1_pv_p"] == 26.1
 
 
 def test_merge_replaces_placeholder_channel_values() -> None:
@@ -579,3 +704,119 @@ def test_non_numeric_values_are_not_rejected() -> None:
     assert data_module.is_invalid_total_increasing(None, True) is False
     assert data_module.is_invalid_total_increasing("-5", True) is False
     assert data_module.is_invalid_total_increasing(False, True) is False
+
+
+def _station_with_reflux(**reflux: object) -> dict:
+    """Build a station payload carrying the given reflux fields."""
+    return {"real_time_data": {"reflux_station_data": reflux}}
+
+
+def test_ev_charger_hidden_when_no_pile_is_advertised() -> None:
+    """A station without a charging pile must not get the sensor.
+
+    pile_power is emitted regardless of whether a charger exists, and on a
+    station without one it mirrored PV power (issue #64). The icon flags are
+    what the vendor app gates the charging-pile node on.
+    """
+    station = _station_with_reflux(pile_power="742", icon_plug=0, icon_ai_plug=0)
+
+    assert has_ev_charger(station) is False
+
+
+def test_ev_charger_power_reports_zero_while_no_pile_is_connected() -> None:
+    """The mirrored legacy value is never interpreted as a real zero."""
+    station = _station_with_reflux(pile_power="742", icon_plug=0, icon_ai_plug=0)
+
+    assert get_ev_charger_power(station) is None
+
+
+def test_ev_charger_exposed_when_a_pile_is_advertised() -> None:
+    """Icon flags expose the entity but do not validate legacy pile_power."""
+    plain = _station_with_reflux(pile_power="3600", icon_plug=1, icon_ai_plug=0)
+    ai = _station_with_reflux(pile_power="3600", icon_plug="0", icon_ai_plug="1")
+
+    assert has_ev_charger(plain) is True
+    assert get_ev_charger_power(plain) is None
+    assert has_ev_charger(ai) is True
+    assert get_ev_charger_power(ai) is None
+
+
+def test_ev_charger_keeps_legacy_behaviour_without_icon_flags() -> None:
+    """A legacy pile_power alone cannot establish charger support."""
+    station = _station_with_reflux(pile_power="3600")
+
+    assert has_ev_charger(station) is False
+    assert get_ev_charger_power(station) is None
+
+
+def test_ev_charger_absent_without_pile_power() -> None:
+    """An advertised pile can have temporarily missing live power."""
+    assert has_ev_charger(_station_with_reflux(icon_plug=1)) is True
+    assert has_ev_charger(_station_with_reflux(pile_power="-")) is False
+    assert get_ev_charger_power(_station_with_reflux()) is None
+
+
+def test_capabilities_report_ev_charger_availability() -> None:
+    """Diagnostics should show whether the charger sensor was created."""
+    real_time_data = {"reflux_station_data": {"pile_power": "742", "icon_plug": 0}}
+
+    capabilities = build_station_capabilities(
+        real_time_data=real_time_data,
+        pv_indicators={},
+        battery_settings={},
+        microinverters_data={},
+    )
+
+    assert capabilities["ev_charger_available"] is False
+
+
+def test_burst_charger_power_uses_es_sp_with_fetch_freshness() -> None:
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
+    station = _station_with_reflux(pile_power="742", icon_plug=1)
+    station["live_data"] = {"es": {"pp": 742, "sp": 0}, "t": "station local", "dly": 10000}
+    station["live_fetched_at"] = now.timestamp()
+    assert has_ev_charger(station) is True
+    assert get_ev_charger_power(station, now=now) == 0.0
+    station["live_data"]["es"]["sp"] = 3600
+    assert get_ev_charger_power(station, now=now) == 3600.0
+    station["live_fetched_at"] -= 91
+    assert get_ev_charger_power(station, now=now) is None
+    station["live_fetched_at"] = None
+    assert get_ev_charger_power(station, now=now) is None
+
+
+def test_grid_connected_needs_explicit_signal() -> None:
+    assert data_module.get_grid_connected(_station_with_reflux(grid_power=123)) is None
+    assert data_module.get_grid_connected(_station_with_reflux(grid_connected=0)) is False
+    assert data_module.get_grid_connected(_station_with_reflux(grid_connected=1)) is True
+
+
+def test_live_icon_overrides_legacy_flags_and_rejects_invalid_power() -> None:
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
+    station = _station_with_reflux(icon_plug=0, pile_power=742)
+    station.update(live_data={"icon": {"pile": 1}, "es": {"sp": 2500}}, live_fetched_at=now.timestamp())
+    assert has_ev_charger(station) is True
+    assert get_ev_charger_power(station, now=now) == 2500
+    for value in (-1, float("nan"), float("inf"), "-"):
+        station["live_data"]["es"]["sp"] = value
+        assert get_ev_charger_power(station, now=now) is None
+    station["live_data"]["icon"]["pile"] = 0
+    assert has_ev_charger(station) is False
+    station["live_data"]["es"]["sp"] = 2500
+    assert get_ev_charger_power(station, now=now) is None
+    station["live_data"]["es"]["sp"] = 0
+    assert get_ev_charger_power(station, now=now) is None
+
+
+def test_live_freshness_respects_configured_scan_interval() -> None:
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
+    station = {"live_data": {"icon": {"pile": 1}, "es": {"sp": 50}}, "live_fetched_at": now.timestamp() - 300, "live_max_age": 600}
+    assert get_ev_charger_power(station, now=now) == 50
+    station["live_fetched_at"] = now.timestamp() - 601
+    assert get_ev_charger_power(station, now=now) is None

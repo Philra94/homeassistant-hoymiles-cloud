@@ -14,13 +14,25 @@
       "confirm": {
         "title": "Confirm Stations",
         "description": "Authentication succeeded. The following stations were discovered: {stations}"
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate Hoymiles Cloud",
+        "description": "Enter updated credentials for the same Hoymiles account. Your stations, entities, and options will be retained.",
+        "data": {
+          "username": "Username (Email)",
+          "password": "Password",
+          "auth_mode": "Authentication mode",
+          "app_version": "Override app version (optional)"
+        }
       }
     },
     "progress": {
       "confirm": "Verifying credentials and discovering stations"
     },
     "abort": {
-      "already_configured": "Account already configured"
+      "already_configured": "Account already configured",
+      "reauth_successful": "Reauthentication was successful",
+      "unknown": "The configuration entry is no longer available"
     },
     "error": {
       "cannot_connect": "Failed to connect to Hoymiles Cloud",
@@ -29,7 +41,9 @@
       "s_miles_home_required": "This S-Miles Home account could not be authenticated. Make sure you are on the latest version and try the 'S-Miles Home' authentication mode. If it still fails, please report it on the integration's issue tracker.",
       "no_stations": "No stations found for this account",
       "no_accessible_stations": "Authentication succeeded, but no accessible stations were returned for this account",
-      "unknown": "Unexpected error"
+      "unknown": "Unexpected error",
+      "account_mismatch": "Use the same account as this integration entry",
+      "already_configured": "This account is already configured"
     }
   },
   "selector": {

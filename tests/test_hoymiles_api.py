@@ -808,8 +808,8 @@ def test_battery_write_retries_verification_while_the_plant_is_pending() -> None
     assert asyncio.run(api.set_battery_mode_settings("123", 1, {"reserve_soc": 11})) is True
 
 
-def test_battery_write_is_not_failed_by_a_permanently_unreadable_verification() -> None:
-    """If the settings never become readable, do not claim the write failed."""
+def test_battery_write_is_not_claimed_applied_when_verification_is_unreadable() -> None:
+    """An unverified write is inconclusive and must not be duplicated."""
     session = FakeSession(
         _read_job(1, "k_1", {"reserve_soc": 10})
         + _async_write_job()
@@ -819,4 +819,4 @@ def test_battery_write_is_not_failed_by_a_permanently_unreadable_verification() 
     api._token = "token"
     api._token_expires_at = 9999999999
 
-    assert asyncio.run(api.set_battery_mode("123", 1)) is True
+    assert asyncio.run(api.set_battery_mode("123", 1)) is False

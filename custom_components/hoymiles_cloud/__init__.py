@@ -1,11 +1,11 @@
 """The Hoymiles Cloud Integration."""
 from copy import deepcopy
+import asyncio
 import logging
 from datetime import timedelta
 import time
 from typing import Any
 
-import async_timeout
 from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed
 from homeassistant.const import CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -46,11 +46,13 @@ from .data import (
     get_schedule_draft,
     merge_missing_pv_channel_values,
     remove_schedule_entry,
+    seed_missing_pv_channels,
     set_schedule_editor_selection,
     update_schedule_editor_draft,
 )
-from .hoymiles_api import HoymilesAPI
+from .hoymiles_api import HoymilesAPI, LiveDataAuthError
 from .models import AIStatus, DeviceInventory, EPSProfit, EnergyFlow, FirmwareStatus, SettingRules, StationData
+from .storage import entry_storage_key, migrate_legacy_stations
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -210,6 +212,7 @@ async def _async_register_services(hass: HomeAssistant) -> None:
         if not await runtime["api"].set_battery_mode(station_id, mode):
             raise HomeAssistantError("Failed to update the Hoymiles battery mode")
 
+        runtime["control_cache_at"].pop(station_id, None)
         await runtime["coordinator"].async_request_refresh()
 
     async def async_handle_set_battery_mode_settings(call: ServiceCall) -> None:
@@ -239,6 +242,7 @@ async def _async_register_services(hass: HomeAssistant) -> None:
                 int(reserve_soc),
             )
 
+        runtime["control_cache_at"].pop(station_id, None)
         await runtime["coordinator"].async_request_refresh()
 
     async def async_handle_load_schedule_draft(call: ServiceCall) -> None:
@@ -472,8 +476,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     session = async_get_clientsession(hass)
     api = HoymilesAPI(session, username, password)
     api.configure_auth(auth_mode=auth_mode, app_version=app_version)
-    store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
-    stored_data = await store.async_load() or {}
+    store = Store(hass, STORAGE_VERSION, entry_storage_key(STORAGE_KEY, entry.entry_id))
+    stored_data = await store.async_load()
 
     try:
         auth_result = await api.authenticate()
@@ -495,6 +499,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not stations:
         raise ConfigEntryNotReady("No Hoymiles stations were returned for this account")
 
+    if stored_data is None:
+        legacy = await Store(hass, STORAGE_VERSION, STORAGE_KEY).async_load()
+        stored_data = migrate_legacy_stations(legacy, set(stations))
+        await store.async_save(stored_data)
+
     if _ensure_station_storage(stored_data, stations):
         await store.async_save(stored_data)
 
@@ -503,6 +512,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     module_data_cache: dict[tuple[str, int], dict[str, float | None]] = {}
     module_data_cache_at: dict[tuple[str, int], float] = {}
     module_data_failures: set[tuple[str, int]] = set()
+    request_limit = asyncio.Semaphore(4)
 
     async def _async_module_values(
         station_id: str,
@@ -561,265 +571,224 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return values_by_channel
 
     async def _async_fetch_static_station_payload(station_id: str) -> dict[str, Any]:
-        """Fetch slower-changing station metadata and device inventory."""
-        try:
-            station_info = await api.get_station_details(station_id)
-        except Exception as err:
-            _LOGGER.warning("Failed to get station details for station %s: %s", station_id, err)
-            station_info = {}
-        if station_info.get("name"):
-            stations[station_id] = str(station_info["name"])
-
-        try:
-            setting_rules = await api.get_setting_rules(station_id)
-        except Exception as err:
-            _LOGGER.warning("Failed to get setting rules for station %s: %s", station_id, err)
-            setting_rules = {}
-
-        try:
-            dtus = await api.get_dtus(station_id)
-        except Exception as err:
-            _LOGGER.warning("Failed to get DTUs for station %s: %s", station_id, err)
-            dtus = []
-
-        try:
-            inverters = await api.get_inverters(station_id)
-        except Exception as err:
-            _LOGGER.warning("Failed to get inverters for station %s: %s", station_id, err)
-            inverters = []
-
-        try:
-            batteries = await api.get_batteries(station_id)
-        except Exception as err:
-            _LOGGER.warning("Failed to get batteries for station %s: %s", station_id, err)
-            batteries = []
-
-        try:
-            meters = await api.get_meters(station_id)
-        except Exception as err:
-            _LOGGER.warning("Failed to get meters for station %s: %s", station_id, err)
-            meters = []
-
-        try:
-            microinverters = await api.get_microinverters_by_stations(station_id)
-        except Exception as err:
-            _LOGGER.warning("Failed to get microinverter details for station %s: %s", station_id, err)
-            microinverters = {}
-
-        try:
-            eps_settings = await api.get_eps_settings(station_id)
-        except Exception as err:
-            _LOGGER.warning("Failed to get EPS settings for station %s: %s", station_id, err)
-            eps_settings = {}
-
-        try:
-            ai_status = await api.get_ai_status(station_id)
-        except Exception as err:
-            _LOGGER.warning("Failed to get AI status for station %s: %s", station_id, err)
-            ai_status = {}
-
-        try:
-            firmware = await api.get_firmware_status(station_id)
-        except Exception as err:
-            _LOGGER.warning("Failed to get firmware status for station %s: %s", station_id, err)
-            firmware = {}
-
-        return {
-            "station_info": station_info,
-            "setting_rules": SettingRules(setting_rules).as_dict(),
-            "devices": DeviceInventory(
-                dtus=dtus,
-                inverters=inverters,
-                batteries=batteries,
-                meters=meters,
-                microinverters=microinverters,
-            ).as_dict(),
-            "eps_settings": eps_settings,
-            "ai_status": AIStatus(ai_status).as_dict(),
-            "firmware": FirmwareStatus(firmware).as_dict(),
+        """Refresh inventory independently of the live telemetry deadline."""
+        methods = {
+            "station_info": api.get_station_details,
+            "setting_rules": api.get_setting_rules,
+            "dtus": api.get_dtus,
+            "inverters": api.get_inverters,
+            "batteries": api.get_batteries,
+            "meters": api.get_meters,
+            "microinverters": api.get_microinverters_by_stations,
+            "eps_settings": api.get_eps_settings,
+            "ai_status": api.get_ai_status,
+            "firmware": api.get_firmware_status,
         }
 
-    async def async_update_data():
-        """Fetch data from API."""
+        async def fetch(name: str, method: Any) -> tuple[str, Any]:
+            try:
+                async with request_limit:
+                    return name, await asyncio.wait_for(method(station_id), timeout=8)
+            except LiveDataAuthError:
+                raise
+            except Exception as err:
+                _LOGGER.debug("Static %s read failed for station %s: %s", name, station_id, err)
+                return name, None
+
+        results = dict(await asyncio.gather(*(fetch(name, method) for name, method in methods.items())))
+        previous = static_station_cache.get(station_id, {})
+        station_info = results["station_info"] or previous.get("station_info", {})
+        if station_info.get("name"):
+            stations[station_id] = str(station_info["name"])
+        old_devices = previous.get("devices", {})
+        devices = DeviceInventory(
+            dtus=results["dtus"] if results["dtus"] is not None else old_devices.get("dtus", []),
+            inverters=results["inverters"] if results["inverters"] is not None else old_devices.get("inverters", []),
+            batteries=results["batteries"] if results["batteries"] is not None else old_devices.get("batteries", []),
+            meters=results["meters"] if results["meters"] is not None else old_devices.get("meters", []),
+            microinverters=results["microinverters"] if results["microinverters"] is not None else old_devices.get("microinverters", {}),
+        ).as_dict()
+        def keep(name: str, wrapper: Any = None) -> dict[str, Any]:
+            value = results[name]
+            if value is None:
+                return previous.get(name, {})
+            return wrapper(value).as_dict() if wrapper else value
+        return {
+            "station_info": station_info,
+            "setting_rules": keep("setting_rules", SettingRules),
+            "devices": devices,
+            "eps_settings": keep("eps_settings"),
+            "ai_status": keep("ai_status", AIStatus),
+            "firmware": keep("firmware", FirmwareStatus),
+        }
+
+    station_limit = asyncio.Semaphore(3)
+    optional_failures: set[tuple[str, str]] = set()
+    control_cache: dict[str, dict[str, Any]] = {}
+    control_cache_at: dict[str, float] = {}
+
+    async def _optional(station_id: str, name: str, method: Any, timeout: float = 6) -> Any:
+        """A failed optional endpoint cannot fail station telemetry."""
         try:
-            async with async_timeout.timeout(30):
-                if api.is_token_expired() and not await api.authenticate():
-                    raise ConfigEntryAuthFailed(
-                        "Hoymiles authentication failed: "
-                        f"{api.last_auth_status} - {api.last_auth_message} "
-                        f"({api.last_auth_attempt_summary})"
-                    )
-
-                refreshed: dict[str, dict] = {}
-                should_save_store = False
-
-                for station_id in stations:
-                    now = time.monotonic()
-                    if (
-                        station_id not in static_station_cache
-                        or now - static_station_cache_at.get(station_id, 0) >= DEFAULT_STATIC_REFRESH_INTERVAL
-                    ):
-                        static_station_cache[station_id] = await _async_fetch_static_station_payload(station_id)
-                        static_station_cache_at[station_id] = now
-                    static_payload = static_station_cache.get(station_id, {})
-
-                    real_time_data = await api.get_real_time_data(station_id)
-
-                    try:
-                        pv_indicators = await api.get_pv_indicators(station_id)
-                    except Exception as err:
-                        _LOGGER.warning(
-                            "Failed to get PV indicators for station %s: %s",
-                            station_id,
-                            err,
-                        )
-                        pv_indicators = {}
-
-                    microinverters = static_payload.get("devices", {}).get(
-                        "microinverters", {}
-                    )
-                    placeholder_channels = find_placeholder_pv_channels(pv_indicators)
-                    if placeholder_channels and len(microinverters) == 1:
-                        micro = next(iter(microinverters.values()))
-                        mi_id = micro.get("id") if isinstance(micro, dict) else None
-                        if mi_id is not None:
-                            module_values_by_channel = await _async_module_values(
-                                station_id, mi_id, placeholder_channels
-                            )
-                            if module_values_by_channel:
-                                pv_indicators = merge_missing_pv_channel_values(
-                                    pv_indicators, module_values_by_channel
-                                )
-                    elif placeholder_channels:
-                        _LOGGER.debug(
-                            "Skipping module data fallback for station %s: "
-                            "%s microinverters",
-                            station_id,
-                            len(microinverters),
-                        )
-
-                    if fetch_grid_indicators:
-                        try:
-                            grid_indicators = await api.get_grid_indicators(station_id)
-                        except Exception as err:
-                            _LOGGER.warning(
-                                "Failed to get grid indicators for station %s: %s",
-                                station_id,
-                                err,
-                            )
-                            grid_indicators = {}
-                    else:
-                        grid_indicators = {}
-
-                    try:
-                        load_indicators = await api.get_load_indicators(station_id)
-                    except Exception as err:
-                        _LOGGER.warning(
-                            "Failed to get load indicators for station %s: %s",
-                            station_id,
-                            err,
-                        )
-                        load_indicators = {}
-
-                    try:
-                        battery_settings = await api.get_battery_settings(station_id)
-                    except Exception as err:
-                        _LOGGER.warning(
-                            "Failed to get battery settings for station %s: %s",
-                            station_id,
-                            err,
-                        )
-                        battery_settings = {}
-
-                    try:
-                        relay_settings = await api.get_relay_settings(station_id)
-                    except Exception as err:
-                        _LOGGER.warning(
-                            "Failed to get relay settings for station %s: %s",
-                            station_id,
-                            err,
-                        )
-                        relay_settings = {}
-
-                    if fetch_energy_flow:
-                        try:
-                            energy_flow = await api.get_energy_flow(station_id)
-                        except Exception as err:
-                            _LOGGER.warning(
-                                "Failed to get energy flow for station %s: %s",
-                                station_id,
-                                err,
-                            )
-                            energy_flow = {}
-                    else:
-                        energy_flow = {}
-
-                    if fetch_eps_profit:
-                        try:
-                            eps_profit = await api.get_eps_profit(station_id)
-                        except Exception as err:
-                            _LOGGER.warning(
-                                "Failed to get EPS profit for station %s: %s",
-                                station_id,
-                                err,
-                            )
-                            eps_profit = {}
-                    else:
-                        eps_profit = {}
-
-                    station_stored_data = stored_data["stations"].setdefault(station_id, {})
-                    enhanced_battery_settings, station_changed = _enhance_battery_settings(
-                        battery_settings,
-                        station_stored_data,
-                    )
-                    should_save_store = should_save_store or station_changed
-
-                    refreshed[station_id] = StationData(
-                        station_info=static_payload.get("station_info", {}),
-                        real_time_data=real_time_data,
-                        energy_flow=EnergyFlow(energy_flow).as_dict(),
-                        pv_indicators=pv_indicators,
-                        grid_indicators=grid_indicators,
-                        load_indicators=load_indicators,
-                        battery_settings=enhanced_battery_settings,
-                        relay_settings=relay_settings,
-                        eps_settings=static_payload.get("eps_settings", {}),
-                        eps_profit=EPSProfit(eps_profit).as_dict(),
-                        ai_status=static_payload.get("ai_status", {}),
-                        setting_rules=static_payload.get("setting_rules", {}),
-                        devices=static_payload.get("devices", {}),
-                        firmware=static_payload.get("firmware", {}),
-                        schedule_editor=build_schedule_editor_state(
-                            enhanced_battery_settings,
-                            station_stored_data,
-                        ),
-                        capabilities=build_station_capabilities(
-                            real_time_data=real_time_data,
-                            pv_indicators=pv_indicators,
-                            battery_settings=enhanced_battery_settings,
-                            microinverters_data=static_payload.get("devices", {}).get("microinverters", {}),
-                            grid_indicators=grid_indicators,
-                            load_indicators=load_indicators,
-                            energy_flow=energy_flow,
-                            relay_settings=relay_settings,
-                            setting_rules=static_payload.get("setting_rules", {}),
-                            devices=static_payload.get("devices", {}),
-                            eps_settings=static_payload.get("eps_settings", {}),
-                            eps_profit=eps_profit,
-                            ai_status=static_payload.get("ai_status", {}),
-                            firmware=static_payload.get("firmware", {}),
-                            station_info=static_payload.get("station_info", {}),
-                        ),
-                    ).as_dict()
-
-                if should_save_store:
-                    await store.async_save(stored_data)
-
-                return refreshed
-        except ConfigEntryAuthFailed:
+            async with request_limit:
+                result = await asyncio.wait_for(method(station_id), timeout=timeout)
+        except LiveDataAuthError:
             raise
         except Exception as err:
-            raise UpdateFailed(f"Error updating data: {err}") from err
+            key = (station_id, name)
+            log = _LOGGER.debug if key in optional_failures else _LOGGER.warning
+            log("Failed to get %s for station %s: %s", name, station_id, err)
+            optional_failures.add(key)
+            return None
+        optional_failures.discard((station_id, name))
+        return result
+
+    async def _station_update(station_id: str) -> tuple[str, dict[str, Any], bool]:
+        async with station_limit:
+            now = time.monotonic()
+            if (station_id not in static_station_cache or
+                    now - static_station_cache_at.get(station_id, 0) >= DEFAULT_STATIC_REFRESH_INTERVAL):
+                static_station_cache[station_id] = await _async_fetch_static_station_payload(station_id)
+                static_station_cache_at[station_id] = now
+            static_payload = static_station_cache.get(station_id, {})
+
+            names = ["real_time_data", "live_data", "pv_indicators", "load_indicators"]
+            methods = [api.get_real_time_data, api.get_live_data, api.get_pv_indicators, api.get_load_indicators]
+            if fetch_grid_indicators:
+                names.append("grid_indicators")
+                methods.append(api.get_grid_indicators)
+            if fetch_energy_flow:
+                names.append("energy_flow")
+                methods.append(api.get_energy_flow)
+            if fetch_eps_profit:
+                names.append("eps_profit")
+                methods.append(api.get_eps_profit)
+            values = await asyncio.gather(*(
+                _optional(station_id, name, method, 45 if name == "live_data" else 6)
+                for name, method in zip(names, methods)
+            ))
+            payloads = dict(zip(names, values))
+            real_time_data = payloads.get("real_time_data") or {}
+            live_data = payloads.get("live_data") or {}
+            live_fetched_at = time.time() if live_data else None
+            pv_indicators = payloads.get("pv_indicators") or {}
+            microinverters = static_payload.get("devices", {}).get("microinverters", {})
+            pv_indicators = seed_missing_pv_channels(pv_indicators, microinverters)
+            placeholders = find_placeholder_pv_channels(pv_indicators)
+            if placeholders and len(microinverters) == 1:
+                micro = next(iter(microinverters.values()))
+                mi_id = micro.get("id") if isinstance(micro, dict) else None
+                if mi_id is not None:
+                    try:
+                        module_values = await asyncio.wait_for(
+                            _async_module_values(station_id, mi_id, placeholders), timeout=5
+                        )
+                    except asyncio.TimeoutError:
+                        module_values = {}
+                    if module_values:
+                        pv_indicators = merge_missing_pv_channel_values(pv_indicators, module_values)
+
+            if (station_id not in control_cache or
+                    now - control_cache_at.get(station_id, 0) >= DEFAULT_STATIC_REFRESH_INTERVAL):
+                battery, relay = await asyncio.gather(
+                    _optional(station_id, "battery_settings", api.get_battery_settings, 12),
+                    _optional(station_id, "relay_settings", api.get_relay_settings, 8),
+                )
+                control_cache[station_id] = {
+                    "battery_settings": battery or {},
+                    "relay_settings": relay or {},
+                }
+                control_cache_at[station_id] = now
+            control = control_cache[station_id]
+            battery_settings = control["battery_settings"]
+            relay_settings = control["relay_settings"]
+            grid_indicators = payloads.get("grid_indicators") or {}
+            load_indicators = payloads.get("load_indicators") or {}
+            energy_flow = payloads.get("energy_flow") or {}
+            eps_profit = payloads.get("eps_profit") or {}
+            station_stored_data = stored_data["stations"].setdefault(station_id, {})
+            enhanced_battery_settings, changed = _enhance_battery_settings(
+                battery_settings, station_stored_data
+            )
+            result = StationData(
+                station_info=static_payload.get("station_info", {}),
+                real_time_data=real_time_data,
+                live_data=live_data,
+                live_fetched_at=live_fetched_at,
+                live_max_age=max(90, scan_interval * 2),
+                telemetry_available=bool(real_time_data or live_data),
+                energy_flow=EnergyFlow(energy_flow).as_dict(),
+                pv_indicators=pv_indicators,
+                grid_indicators=grid_indicators,
+                load_indicators=load_indicators,
+                battery_settings=enhanced_battery_settings,
+                relay_settings=relay_settings,
+                eps_settings=static_payload.get("eps_settings", {}),
+                eps_profit=EPSProfit(eps_profit).as_dict(),
+                ai_status=static_payload.get("ai_status", {}),
+                setting_rules=static_payload.get("setting_rules", {}),
+                devices=static_payload.get("devices", {}),
+                firmware=static_payload.get("firmware", {}),
+                schedule_editor=build_schedule_editor_state(enhanced_battery_settings, station_stored_data),
+                capabilities=build_station_capabilities(
+                    real_time_data=real_time_data,
+                    pv_indicators=pv_indicators,
+                    battery_settings=enhanced_battery_settings,
+                    microinverters_data=microinverters,
+                    grid_indicators=grid_indicators,
+                    load_indicators=load_indicators,
+                    energy_flow=energy_flow,
+                    relay_settings=relay_settings,
+                    setting_rules=static_payload.get("setting_rules", {}),
+                    devices=static_payload.get("devices", {}),
+                    eps_settings=static_payload.get("eps_settings", {}),
+                    eps_profit=eps_profit,
+                    ai_status=static_payload.get("ai_status", {}),
+                    firmware=static_payload.get("firmware", {}),
+                    station_info=static_payload.get("station_info", {}),
+                ),
+            ).as_dict()
+            return station_id, result, changed
+
+    async def async_update_data():
+        """Refresh stations independently and keep failed stations unavailable."""
+        if api.is_token_expired() and not await api.authenticate():
+            raise ConfigEntryAuthFailed(
+                "Hoymiles authentication failed: "
+                f"{api.last_auth_status} - {api.last_auth_message}"
+            )
+        results = await asyncio.gather(
+            *(_station_update(station_id) for station_id in stations),
+            return_exceptions=True,
+        )
+        refreshed: dict[str, dict[str, Any]] = {}
+        should_save = False
+        for station_id, result in zip(stations, results):
+            if isinstance(result, LiveDataAuthError):
+                raise ConfigEntryAuthFailed("Hoymiles Cloud session is no longer authorized") from result
+            if isinstance(result, BaseException):
+                _LOGGER.warning("Station %s refresh failed: %s", station_id, result)
+                previous = (coordinator.data or {}).get(station_id, {})
+                refreshed[station_id] = {
+                    **previous,
+                    "real_time_data": {},
+                    "live_data": {},
+                    "live_fetched_at": None,
+                    "telemetry_available": False,
+                    "pv_indicators": {},
+                    "grid_indicators": {},
+                    "load_indicators": {},
+                    "energy_flow": {},
+                    "eps_profit": {},
+                }
+            else:
+                _, refreshed[station_id], changed = result
+                should_save = should_save or changed
+        if should_save:
+            await store.async_save(stored_data)
+        if not any(item.get("telemetry_available") for item in refreshed.values()):
+            raise UpdateFailed("No station telemetry could be refreshed")
+        return refreshed
 
     coordinator = DataUpdateCoordinator(
         hass,
@@ -840,6 +809,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "stored_data": stored_data,
         "entry": entry,
         "static_station_cache": static_station_cache,
+        "control_cache_at": control_cache_at,
+        "invalidate_control_cache": lambda station_id: control_cache_at.pop(station_id, None),
         "fetch_grid_indicators": fetch_grid_indicators,
         "fetch_energy_flow": fetch_energy_flow,
         "fetch_eps_profit": fetch_eps_profit,
@@ -943,8 +914,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not await api.set_battery_mode_settings(station_id, mode, payload, merge=True):
             raise HomeAssistantError("Failed to apply the Hoymiles schedule draft")
 
+        control_cache_at.pop(station_id, None)
+        await coordinator.async_refresh()
+        if not coordinator.last_update_success or not battery_settings_readable(
+            (coordinator.data or {}).get(station_id, {}).get("battery_settings", {})
+        ):
+            raise HomeAssistantError(
+                "Schedule write completed, but fresh settings could not be read; the draft was retained"
+            )
         await async_load_schedule_draft(station_id, mode)
-        await coordinator.async_request_refresh()
 
     async def async_add_schedule_entry_for_mode(station_id: str, mode: int) -> None:
         """Add a new schedule row or date window for the selected editor mode."""
@@ -971,7 +949,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await _async_register_services(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_on_unload(entry.add_update_listener(update_listener))
+    original_options = dict(entry.options)
+
+    async def options_update_listener(hass: HomeAssistant, updated_entry: ConfigEntry) -> None:
+        """Only options require listener reload; reauth performs its own reload."""
+        if dict(updated_entry.options) != original_options:
+            await hass.config_entries.async_reload(updated_entry.entry_id)
+
+    entry.async_on_unload(entry.add_update_listener(options_update_listener))
     return True
 
 
@@ -982,8 +967,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN].pop(entry.entry_id, None)
         await _async_unregister_services(hass)
     return unload_ok
-
-
-async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Handle options update."""
-    await hass.config_entries.async_reload(entry.entry_id) 
