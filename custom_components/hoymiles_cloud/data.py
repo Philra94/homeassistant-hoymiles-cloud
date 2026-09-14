@@ -695,8 +695,58 @@ def get_pv_indicator_value(
     return get_indicator_value(pv_indicators, key)
 
 
-def discover_pv_channels(pv_indicators: dict[str, Any] | None) -> list[int]:
-    """Return the discovered PV channel numbers for a station."""
+def single_microinverter_port_count(
+    microinverters: dict[str, Any] | None,
+) -> int | None:
+    """Return the known port count for a single-microinverter station.
+
+    Some accounts never return PV indicator keys for channels beyond the
+    first, even on inverters whose own device record confirms more than
+    one port (observed on an HMS-800-2WB, where dev/micro/find -> rule.port
+    reports 2 but the indicators feed only ever lists "1_pv_*" keys).
+
+    On a station with exactly one microinverter, "channel N == port N"
+    always holds, so the device's own reported port count can safely seed
+    channel discovery directly -- no mapping ambiguity is possible with
+    only one device. This intentionally returns None (no override) for
+    any station with zero or more than one microinverter: with several
+    microinverters, nothing we currently fetch says which device's
+    reading belongs to which station-level indicator channel, and
+    guessing that mapping and publishing values under it would be worse
+    than a channel staying undiscovered (see #56).
+    """
+    if not microinverters or len(microinverters) != 1:
+        return None
+    micro = next(iter(microinverters.values()))
+    if not isinstance(micro, dict):
+        return None
+    rule = micro.get("rule")
+    if not isinstance(rule, dict):
+        return None
+    port = rule.get("port")
+    if not isinstance(port, int) or port < 1:
+        return None
+    return port
+
+
+def discover_pv_channels(
+    pv_indicators: dict[str, Any] | None,
+    *,
+    known_port_count: int | None = None,
+) -> list[int]:
+    """Return the discovered PV channel numbers for a station.
+
+    Normally channels are discovered purely from whichever "{N}_pv_v" /
+    "{N}_pv_i" / "{N}_pv_p" keys are present in the account's indicators
+    payload. Some accounts (observed on an HMS-800-2WB "HiFlow Pro" unit)
+    never return indicator keys for a channel beyond the first, even
+    though the inverter's own device record (dev/micro/find -> rule.port)
+    confirms it genuinely has more than one string. ``known_port_count``
+    is an explicit override to force channels 1..known_port_count to
+    always be considered discovered, so the existing placeholder-filling
+    fallback (find_placeholder_pv_channels / merge_missing_pv_channel_values)
+    kicks in for the missing channel(s) using module-chart data instead.
+    """
     channels: set[int] = set()
     items = pv_indicators.get("list", []) if pv_indicators else []
     for item in items:
@@ -704,6 +754,8 @@ def discover_pv_channels(pv_indicators: dict[str, Any] | None) -> list[int]:
         prefix, _, suffix = key.partition("_pv_")
         if suffix in {"v", "i", "p"} and prefix.isdigit():
             channels.add(int(prefix))
+    if known_port_count:
+        channels.update(range(1, known_port_count + 1))
     return sorted(channels)
 
 
@@ -739,10 +791,14 @@ def _is_zero(value: Any) -> bool:
     return False
 
 
-def find_placeholder_pv_channels(pv_indicators: dict[str, Any] | None) -> list[int]:
+def find_placeholder_pv_channels(
+    pv_indicators: dict[str, Any] | None,
+    *,
+    known_port_count: int | None = None,
+) -> list[int]:
     """Return discovered PV channels whose v/i/p values are all placeholders."""
     channels: list[int] = []
-    for channel in discover_pv_channels(pv_indicators):
+    for channel in discover_pv_channels(pv_indicators, known_port_count=known_port_count):
         metrics = [
             get_pv_indicator_value(pv_indicators, f"{channel}_pv_{metric}")
             for metric in ("v", "i", "p")
@@ -1028,7 +1084,10 @@ def build_station_capabilities(
     station_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Summarize station capabilities from the current API payloads."""
-    pv_channels = discover_pv_channels(pv_indicators)
+    pv_channels = discover_pv_channels(
+        pv_indicators,
+        known_port_count=single_microinverter_port_count(microinverters_data),
+    )
     battery_settings = battery_settings or {}
     setting_rules = setting_rules or {}
     devices = devices or {}

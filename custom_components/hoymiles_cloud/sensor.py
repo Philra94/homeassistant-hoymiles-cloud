@@ -34,6 +34,7 @@ from .const import BATTERY_MODES, DOMAIN, METER_LOCATION_NAMES
 from .data import (
     battery_settings_readable,
     discover_pv_channels,
+    single_microinverter_port_count,
     get_allowed_battery_modes,
     get_energy_flow_value,
     get_indicator_value,
@@ -673,7 +674,12 @@ async def async_setup_entry(
                 ]
             )
 
-        for channel in discover_pv_channels(station_data.get("pv_indicators", {})):
+        for channel in discover_pv_channels(
+            station_data.get("pv_indicators", {}),
+            known_port_count=single_microinverter_port_count(
+                station_data.get("devices", {}).get("microinverters", {})
+            ),
+        ):
             entities.extend(
                 [
                     HoymilesPVChannelSensor(coordinator, station_id, station_name, channel, "v"),

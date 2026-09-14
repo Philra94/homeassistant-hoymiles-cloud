@@ -43,6 +43,18 @@ API_ENERGY_FLOW_STATS_URL = f"{API_BASE_URL}/pvm-data/api/0/station/data_fd/stat
 API_INDICATORS_URL = f"{API_BASE_URL}/pvm-data/api/0/indicators/data/select_real_indicators_data"
 API_MODULE_DAY_DATA_URL = f"{API_BASE_URL}/pvm-data/api/0/module/data/count_by_day"
 
+# The protobuf-encoded module/data/count_by_day endpoint above has a
+# confirmed bug (both in this integration's decoder and, seemingly, in
+# how the raw payload itself packs values): the returned "data" array is
+# always exactly 2x the length of "x_axis", with no reliable, verified
+# way found to recover correct per-timestamp values from it. Cross-checked
+# against Hoymiles' own CSV export for the same inverter/day, values read
+# from that endpoint were off by roughly 100x. The export endpoint below
+# returns the same per-port voltage/current/power data as a small
+# zipped CSV instead, and has been verified correct (V x I matches the
+# reported P for every row). Prefer this for per-channel module data.
+API_MODULE_EXPORT_URL = f"{API_BASE_URL}/pvm-report/api/0/station/report/export_module_quota_data"
+
 # Module (per-port PV) chart fallback tuning.
 # The Hoymiles cloud only refreshes plant telemetry every ~5 minutes, so the
 # day-chart response is cached for slightly less than that instead of being

@@ -43,6 +43,7 @@ from .data import (
     build_schedule_payload_from_draft,
     build_station_capabilities,
     find_placeholder_pv_channels,
+    single_microinverter_port_count,
     get_schedule_draft,
     merge_missing_pv_channel_values,
     remove_schedule_entry,
@@ -678,7 +679,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     microinverters = static_payload.get("devices", {}).get(
                         "microinverters", {}
                     )
-                    placeholder_channels = find_placeholder_pv_channels(pv_indicators)
+                    placeholder_channels = find_placeholder_pv_channels(
+                        pv_indicators,
+                        known_port_count=single_microinverter_port_count(microinverters),
+                    )
                     if placeholder_channels and len(microinverters) == 1:
                         micro = next(iter(microinverters.values()))
                         mi_id = micro.get("id") if isinstance(micro, dict) else None
