@@ -208,3 +208,14 @@ def test_diagnostics_tolerate_api_without_fetch_status() -> None:
     diagnostics = _diagnostics_for({"devices": {}})
 
     assert diagnostics["device_fetch_status"] == {}
+
+
+def test_burst_diagnostics_are_json_safe_and_omit_raw_identifiers():
+    import json
+    burst = load_integration_module('burst')
+    sample = burst.Sample({'con': 1, 'mis': [{'sn': 'private-serial', 'pac': 100}],
+                           'uri': 'https://example.test/?token=private'}, 10, 10, 2, 'live')
+    summary = diagnostics_module._station_summary({'burst': {'inverters': sample}})
+    encoded = json.dumps(summary)
+    assert 'private' not in encoded
+    assert summary['burst'] == {'inverters': {'state': 'live', 'delay_seconds': 2, 'schema': ['mis']}}

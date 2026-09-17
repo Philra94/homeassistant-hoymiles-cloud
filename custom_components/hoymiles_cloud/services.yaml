@@ -1,3 +1,5 @@
+# Fast cloud power updates are configured in integration options.
+# They do not add services or change the battery write/readback contract below.
 set_battery_mode:
   name: Set battery mode
   description: Activate a Hoymiles battery mode for a station using the direct battery-config write path.

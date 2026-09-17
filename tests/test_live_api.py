@@ -174,3 +174,77 @@ def test_battery_writes_serialize_per_station_without_blocking_other_stations():
         assert entered == ["A", "B", "A"]
 
     asyncio.run(run())
+
+
+def test_burst_accepts_hms_station_and_explicit_inverter_requests():
+    api, session = client([
+        {'status': '0', 'data': SIGNED},
+        {'status': '0', 'data': {'con': 1, 'power': {'pv': 123}}},
+        {'status': '0', 'data': {'con': 1, 'mis': [{'sn': 'A', 'pac': 100}]}},
+    ])
+    async def run():
+        assert (await api.get_burst_data('123'))['power']['pv'] == 123
+        assert (await api.get_burst_data('123', serials=['A']))['mis'][0]['pac'] == 100
+    asyncio.run(run())
+    assert session.requests[-1]['kwargs']['json'] == {'m': 3, 'mis': ['A'], 't': 1}
+    assert len(session.requests) == 3
+
+
+def test_burst_startup_metadata_does_not_cause_url_renewal():
+    api, session = client([{'status': '0', 'data': SIGNED}, {'data': {'con': 1, 'dly': 5000}}])
+    assert asyncio.run(api.get_burst_data('123')) == {'con': 1, 'dly': 5000}
+    assert len(session.requests) == 2
+
+
+def test_burst_uri_is_proactively_renewed(monkeypatch):
+    api, session = client([{'status': '0', 'data': SIGNED}, {'data': {'power': {'pv': 0}}}])
+    api._live_uris['123'] = SIGNED.replace('private-value', 'expired')
+    api._live_uri_times['123'] = 10
+    monkeypatch.setattr(module.time, 'monotonic', lambda: 300.)
+    assert asyncio.run(api.get_burst_data('123')) == {'power': {'pv': 0}}
+    assert len(session.requests) == 2
+
+
+def test_concurrent_expired_token_requests_authenticate_once():
+    api, _ = client([])
+    api._token_expires_at = 0
+    calls = []
+    async def authenticate():
+        calls.append(True)
+        await asyncio.sleep(0)
+        api._token_expires_at = 9999999999
+        return True
+    api.authenticate = authenticate
+    async def run():
+        await asyncio.gather(*(api._ensure_authenticated() for _ in range(15)))
+    asyncio.run(run())
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('second_status', [200, 401])
+def test_burst_http_401_refreshes_credentials_once_then_recovers_or_requests_reauth(second_status):
+    class StatusSession(FakeSession):
+        def post(self, *args, **kwargs):
+            request = super().post(*args, **kwargs)
+            request._response.status = request._response._payload.pop('_http_status', 200)
+            return request
+    session = StatusSession([
+        {'status': '0', 'data': SIGNED}, {'_http_status': 401},
+        {'status': '0', 'data': SIGNED},
+        {'_http_status': second_status, 'data': {'con': 1, 'power': {'pv': 100}}},
+    ])
+    api = HoymilesAPI(session, 'test@example.test', 'unused')
+    api._token, api._token_expires_at = 'old', 9999999999
+    refreshed = []
+    async def authenticate():
+        refreshed.append(True)
+        api._token, api._token_expires_at = 'new', 9999999999
+        return True
+    api.authenticate = authenticate
+    if second_status == 200:
+        assert asyncio.run(api.get_burst_data('123'))['power']['pv'] == 100
+    else:
+        with pytest.raises(module.LiveDataAuthError):
+            asyncio.run(api.get_burst_data('123'))
+    assert refreshed == [True]
+    assert session.requests[-1]['kwargs']['headers']['Authorization'] == 'new'

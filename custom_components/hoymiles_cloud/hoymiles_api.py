@@ -98,6 +98,10 @@ class LiveDataAuthError(LiveDataError):
     """The cloud rejected authentication for live telemetry."""
 
 
+class _BurstUnauthorized(LiveDataError):
+    """Retry one HTTP 401 with refreshed credentials before requesting reauth."""
+
+
 DEFAULT_MODE_SETTINGS: dict[int, dict[str, Any]] = {
     BATTERY_MODE_SELF_CONSUMPTION: {"reserve_soc": 10},
     BATTERY_MODE_ECONOMY: {"reserve_soc": 10, "money_code": "$", "date": []},
@@ -170,6 +174,9 @@ class HoymilesAPI:
         self._fetch_status: Dict[str, Dict[str, Any]] = {}
         self._fetch_failure_keys: set[str] = set()
         self._live_uris: dict[str, str] = {}
+        self._live_uri_times: dict[str, float] = {}
+        self._live_locks: dict[str, asyncio.Lock] = {}
+        self._authentication_lock = asyncio.Lock()
         self._battery_write_locks: dict[str, asyncio.Lock] = {}
 
     def _battery_write_lock(self, station_id: str) -> asyncio.Lock:
@@ -395,9 +402,10 @@ class HoymilesAPI:
 
     async def _ensure_authenticated(self) -> None:
         """Authenticate if needed before an API request."""
-        if not self._token or self.is_token_expired():
-            if not await self.authenticate():
-                raise LiveDataAuthError("Hoymiles authentication failed")
+        async with self._authentication_lock:
+            if not self._token or self.is_token_expired():
+                if not await self.authenticate():
+                    raise LiveDataAuthError("Hoymiles authentication failed")
 
     async def _post_json(
         self,
@@ -478,7 +486,7 @@ class HoymilesAPI:
             raise LiveDataError("Hoymiles returned no live-data endpoint")
         return self._validate_live_uri(uri)
 
-    async def _post_live_burst(self, uri: str) -> dict[str, Any]:
+    async def _post_live_burst(self, uri: str, *, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Post without sharing the authenticated session's cookie jar."""
         # aiohttp injects CookieJar cookies even when no Cookie header is given.
         # The stream requires account authorization, but must not inherit cookies.
@@ -496,7 +504,7 @@ class HoymilesAPI:
         try:
             async with session.post(
                 uri,
-                json={"m": 0, "t": 1, "reflux": 0},
+                json=payload if payload is not None else {"m": 0, "t": 1, "reflux": 0},
                 headers={
                     "Accept": "application/json",
                     "Content-Type": "application/json",
@@ -506,6 +514,9 @@ class HoymilesAPI:
                 allow_redirects=False,
             ) as response:
                 status = getattr(response, "status", 200)
+                if status == 401:
+                    self._token_expires_at = 0
+                    raise _BurstUnauthorized("Hoymiles rejected the burst request")
                 if status != 200:
                     raise LiveDataError("Hoymiles live-data request failed")
                 return await response.json()
@@ -514,32 +525,54 @@ class HoymilesAPI:
                 await session.close()
 
     async def get_live_data(self, station_id: str) -> dict[str, Any]:
-        """Fetch raw compact burst telemetry through a short-lived signed URI."""
+        """Compatibility path for the ordinary coordinator's hybrid charger."""
+        data = await self.get_burst_data(station_id)
+        if not isinstance(data.get("es"), dict):
+            raise LiveDataError("Hoymiles returned incomplete hybrid live data")
+        return data
+
+    async def get_burst_data(
+        self, station_id: str, *, serials: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Read station totals or explicitly addressed microinverters.
+
+        A connected stream can initially omit its measurements. Keep the
+        connection/delay metadata so the poller can retry at the proper cadence.
+        """
         key = str(station_id)
-        for attempt in range(2):
-            uri = self._live_uris.get(key)
-            if uri is None:
-                uri = await self._get_live_uri(key)
-                self._live_uris[key] = uri
-            try:
-                result = await self._post_live_burst(uri)
-                if not isinstance(result, dict):
-                    raise LiveDataError("Hoymiles returned invalid live data")
-                if "status" in result and str(result["status"]) != "0":
-                    raise LiveDataError("Hoymiles live-data request failed")
-                data = result.get("data", result)
-                if not isinstance(data, dict):
-                    raise LiveDataError("Hoymiles returned invalid live data")
-                if not isinstance(data.get("es"), dict):
-                    raise LiveDataError("Hoymiles returned incomplete live data")
-                return data
-            except LiveDataAuthError:
-                self._live_uris.pop(key, None)
-                raise
-            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, LiveDataError):
-                self._live_uris.pop(key, None)
-                if attempt:
-                    raise LiveDataError("Hoymiles live data is unavailable") from None
+        payload = ({"m": 3, "t": 1, "mis": serials} if serials else
+                   {"m": 0, "t": 1, "reflux": 0})
+        async with self._live_locks.setdefault(key, asyncio.Lock()):
+            for attempt in range(2):
+                uri = self._live_uris.get(key)
+                if uri is None or time.monotonic() - self._live_uri_times.get(key, time.monotonic()) >= 240:
+                    uri = await self._get_live_uri(key)
+                    self._live_uris[key] = uri
+                    self._live_uri_times[key] = time.monotonic()
+                try:
+                    result = await self._post_live_burst(uri, payload=payload)
+                    if not isinstance(result, dict) or ("status" in result and str(result["status"]) != "0"):
+                        raise LiveDataError("Hoymiles live-data request failed")
+                    data = result.get("data", result)
+                    if not isinstance(data, dict):
+                        raise LiveDataError("Hoymiles returned invalid live data")
+                    if not any(isinstance(data.get(field), kind) for field, kind in
+                               (("es", dict), ("power", dict), ("mis", list))) and "con" not in data:
+                        raise LiveDataError("Hoymiles returned incomplete live data")
+                    return data
+                except _BurstUnauthorized:
+                    self._live_uris.pop(key, None)
+                    self._live_uri_times.pop(key, None)
+                    if attempt:
+                        raise LiveDataAuthError("Hoymiles rejected live-data authorization") from None
+                except LiveDataAuthError:
+                    self._live_uris.pop(key, None)
+                    raise
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, LiveDataError):
+                    self._live_uris.pop(key, None)
+                    self._live_uri_times.pop(key, None)
+                    if attempt:
+                        raise LiveDataError("Hoymiles live data is unavailable") from None
         raise LiveDataError("Hoymiles live data is unavailable")
 
     async def _post_bytes(
@@ -1108,7 +1141,7 @@ class HoymilesAPI:
         """Return the current authenticated user details."""
         if not self._token or self.is_token_expired():
             _LOGGER.debug("No valid token available, authenticating first")
-            await self.authenticate()
+            await self._ensure_authenticated()
 
         try:
             async with self._session.post(
@@ -1135,7 +1168,7 @@ class HoymilesAPI:
         """Get all stations for the authenticated user."""
         if not self._token or self.is_token_expired():
             _LOGGER.debug("No token available, authenticating first")
-            await self.authenticate()
+            await self._ensure_authenticated()
 
         stations: Dict[str, str] = {}
         page_num = 1
@@ -1360,7 +1393,7 @@ class HoymilesAPI:
         """Get all microinverters with detail for a station."""
         if not self._token or self.is_token_expired():
             _LOGGER.debug("No token available, authenticating first")
-            await self.authenticate()
+            await self._ensure_authenticated()
 
         data = {
             "sid": int(station_id),
@@ -1492,7 +1525,7 @@ class HoymilesAPI:
     async def get_real_time_data(self, station_id: str) -> Dict[str, Any]:
         """Get real-time data for a station."""
         if not self._token or self.is_token_expired():
-            await self.authenticate()
+            await self._ensure_authenticated()
 
         data = {
             "sid": int(station_id),
@@ -1573,7 +1606,7 @@ class HoymilesAPI:
     async def get_battery_settings(self, station_id: str) -> Dict[str, Any]:
         """Get battery settings for a station."""
         if self.is_token_expired():
-            await self.authenticate()
+            await self._ensure_authenticated()
         try:
             response = await self._submit_battery_settings_command(
                 API_BATTERY_SETTINGS_READ_URL,
@@ -1945,7 +1978,7 @@ class HoymilesAPI:
     ) -> bool:
         """Write a full mode payload to the battery settings endpoint."""
         if not self._token or self.is_token_expired():
-            await self.authenticate()
+            await self._ensure_authenticated()
 
         payload_data: dict[str, Any] = {"mode": mode}
         if mode_settings:

@@ -66,7 +66,11 @@
           "scan_interval": "Data update interval (seconds)",
           "fetch_grid_indicators": "Fetch 3-phase grid indicators",
           "fetch_energy_flow": "Fetch daily energy-flow statistics",
-          "fetch_eps_profit": "Fetch EPS profit and spend statistics"
+          "fetch_eps_profit": "Fetch EPS profit and spend statistics",
+          "fast_polling": "Enable fast cloud power updates (experimental)"
+        },
+        "data_description": {
+          "fast_polling": "Uses a separate live stream for PV and charger power. Cadence depends on the device; other readings keep the normal update interval."
         }
       }
     }
@@ -131,6 +135,12 @@
           "clean": "Clean",
           "dirty": "Dirty"
         }
+      },
+      "burst_ac_power": {
+        "name": "Microinverter AC Power"
+      },
+      "burst_pv_power": {
+        "name": "Microinverter PV Power"
       }
     },
     "select": {

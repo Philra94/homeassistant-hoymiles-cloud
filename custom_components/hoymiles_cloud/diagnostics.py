@@ -27,6 +27,7 @@ except ImportError:  # pragma: no cover - enables pure unit tests without Home A
 
         return _redact(data)
 
+from .burst import Sample
 from .const import CONF_APP_VERSION, CONF_AUTH_MODE, DOMAIN
 from .data import (
     get_allowed_battery_modes,
@@ -157,6 +158,12 @@ def _station_summary(station_data: dict[str, Any]) -> dict[str, Any]:
         # be diagnosed without them.
         "real_time_data": station_data.get("real_time_data", {}),
         "live_data": station_data.get("live_data", {}),
+        "burst": {
+            scope: {"state": sample.state, "delay_seconds": sample.delay,
+                    "schema": [key for key in ("es", "power", "mis") if key in sample.data]}
+            for scope, sample in station_data.get("burst", {}).items()
+            if isinstance(sample, Sample)
+        },
         "pv_indicators": station_data.get("pv_indicators", {}),
         "grid_indicators": station_data.get("grid_indicators", {}),
         "load_indicators": station_data.get("load_indicators", {}),

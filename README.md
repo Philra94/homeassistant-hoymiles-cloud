@@ -2,31 +2,42 @@
 
 This custom integration for Home Assistant allows you to monitor and control your Hoymiles solar inverter system through the Hoymiles Cloud API.
 
-## Release candidate: 1.3.1rc2
+## Release candidates
 
-This prerelease targets **1.3.1** and builds on 1.3.0. It includes Claude's
-single-microinverter port-count discovery work and further telemetry, privacy,
-and lifecycle fixes. See [candidate notes](docs/release-1.3.1rc2.md).
+[1.3.1rc3](docs/release-1.3.1rc3.md) is the maintenance candidate: it includes
+RC2's confirmed charger and PV-channel fixes and rejects disconnected charger
+samples. Stable remains 1.3.0 while the documented release checks are completed.
 
-- RC2 fixes the missing authorization header on burst requests, verified with
-  read-only live cloud samples. Polling still uses the configured integration
-  interval; dedicated fast PV polling is not included.
-- EV charger power now uses the portal's signed live burst endpoint. The old
-  `pile_power` field can mirror solar output and is no longer used as charger
-  telemetry. An unavailable stream produces an unavailable sensor, not a made-up
-  zero. A fresh live zero remains zero when the station advertises a charger.
-- Optional entities can appear after setup as device data becomes available.
-- Battery commands must pass a settings read and readback verification; an
-  unconfirmed write is reported as a failure.
-- Each configured account has separate draft storage. Existing drafts are copied
-  from legacy storage automatically, without deleting the legacy file.
-- Reauthentication updates the same account. Diagnostics redact the account title
-  and signed URLs as well as credentials and identifiers.
+[1.4.0rc1](docs/release-1.4.0rc1.md) adds experimental **fast cloud power updates**
+for issue #69 on top of RC3. Enable beta versions in HACS, install this candidate,
+restart Home Assistant, then enable **Enable fast cloud power updates
+(experimental)** in the integration's options. It is **off by default**.
 
-Install the prerelease only if you want to test these changes. For manual
-installation, extract the release archive's `custom_components/hoymiles_cloud`
-folder into your Home Assistant configuration and restart Home Assistant.
-Preserve a configuration backup if you need to roll back draft edits.
+- Station PV Power and hybrid EV Charger Power use a separate burst poller.
+  Cadence follows the server: HMS users reported 2–3 seconds; our hybrid test
+  returned 10 seconds. Network latency and account size can increase the interval.
+- Single-microinverter PV channel power and its complete string-power total use
+  burst readings while keeping existing entity IDs. Each
+  identified microinverter gains an AC Power sensor. Multi-microinverter stations
+  gain explicitly addressed per-inverter PV power sensors; existing station
+  channels are not remapped or renumbered.
+- Voltage, current, temperature, energy totals, battery/grid/load readings and
+  settings keep their existing sources and ordinary polling interval. No battery
+  controls or energy-counter semantics change.
+- Valid zero remains zero. Disconnected or stale stream data becomes unavailable,
+  not an invented zero. A transport failure falls back to ordinary PV readings
+  where available; burst-only inverter sensors become unavailable. Recovery
+  automatically restores burst readings. Known offline readings cannot fall back
+  to cached slow power.
+- EU burst endpoints are supported. Consumer-specific MS-A2 endpoints and other
+  regions have not been validated. HMS power mapping is covered by source
+  comparison and synthetic tests; real HMS validation remains required.
+
+Disabling the option reloads the integration and stops all burst requests.
+Burst-only sensors then become unavailable. Existing entity IDs and per-account
+draft storage are preserved. Back up the configuration before testing; restore
+RC3 and restart to remove the feature. New per-entry draft edits are not copied
+back to the older shared storage when rolling back before 1.3.1.
 
 ## Features
 
