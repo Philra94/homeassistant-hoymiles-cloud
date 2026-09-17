@@ -1131,6 +1131,10 @@ def get_ev_charger_power(
     """Return verified burst charger watts; missing data is never a zero."""
     if not has_ev_charger(station_data):
         return None
+    if "burst" in (station_data or {}):
+        from .burst import select_power
+        _, value = select_power(station_data, "ev_charger_power")
+        return value
     live = get_fresh_live_data(station_data, now=now)
     es = live.get("es") if live else None
     if not isinstance(es, dict):
