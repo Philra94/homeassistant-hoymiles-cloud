@@ -31,7 +31,7 @@ installing; restore RC3 and restart to roll back. RC2/RC3 tags remain unchanged.
 See [protocol and validation notes](https://github.com/Philra94/homeassistant-hoymiles-cloud/blob/v1.4.0rc1/docs/hoymiles-burst-api.md)
 for pinned comparisons with ioBroker, the MS-A2 MQTT client and Homebridge.
 
-170 standalone regression tests pass. Home Assistant 2026.9.2 lifecycle tests with 15
+172 standalone regression tests pass. Home Assistant 2026.9.2 lifecycle tests with 15
 simulated stations covers option-off/on behavior, routing, scheduling, competing
 slow updates, failures and unload, plus options and isolated two-account storage reloads. A bounded read-only real hybrid probe returned
 three connected samples at a 10-second cadence with advancing timestamps and

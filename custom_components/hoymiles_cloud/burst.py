@@ -142,7 +142,7 @@ def select_channel_power(station: dict[str, Any], channel: int, *, now: float | 
 
 
 class BurstPoller:
-    """One cancellable loop per station, independent of slow coordinator timing."""
+    """Independent cancellable station/inverter loops, separate from slow polling."""
 
     def __init__(self, api: Any, stations: Callable[[], dict[str, dict[str, Any]]],
                  publish: Callable[[], None], auth_failed: Callable[[], None], *,
@@ -152,7 +152,7 @@ class BurstPoller:
         self.clock, self.wall_clock = clock, wall_clock
         self.samples: dict[str, dict[str, Sample]] = {}
         self.failures: dict[tuple[str, str], int] = {}
-        self._tasks: dict[str, asyncio.Task] = {}
+        self._tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._due: dict[tuple[str, str], float] = {}
         self._limit = asyncio.Semaphore(2)
         self._expiry_task: asyncio.Task | None = None
@@ -164,8 +164,10 @@ class BurstPoller:
         if self._expiry_task is None and not self._stopped:
             self._expiry_task = asyncio.create_task(self._expire_loop(), name="hoymiles-burst-expiry")
         for sid in self.stations():
-            if sid not in self._tasks and not self._stopped:
-                self._tasks[sid] = asyncio.create_task(self._run(sid), name="hoymiles-burst")
+            for scope in ("station", "inverters"):
+                key = (sid, scope)
+                if key not in self._tasks and not self._stopped:
+                    self._tasks[key] = asyncio.create_task(self._run(sid, scope), name="hoymiles-burst")
 
     async def stop(self) -> None:
         self._stopped = True
@@ -194,18 +196,20 @@ class BurstPoller:
             await asyncio.sleep(MIN_DELAY)
             self.expire()
 
-    async def _run(self, sid: str) -> None:
+    async def _run(self, sid: str, scope: str) -> None:
         while not self._stopped and not self._auth_failed:
-            delay = await self.poll_once(sid)
+            delay = await self.poll_once(sid, scope_only=scope)
             await asyncio.sleep(delay)
 
-    async def poll_once(self, sid: str) -> float:
+    async def poll_once(self, sid: str, *, scope_only: str | None = None) -> float:
         """Fetch each supported scope independently; a device error cannot erase totals."""
         from .hoymiles_api import LiveDataAuthError
 
         station = self.stations().get(sid, {})
         serials = list(inverter_targets(station))
         scopes = [("station", None)] + ([("inverters", serials)] if serials else [])
+        if scope_only is not None:
+            scopes = [(scope, requested) for scope, requested in scopes if scope == scope_only]
         if not serials:
             self.samples.get(sid, {}).pop("inverters", None)
         for scope, requested in scopes:

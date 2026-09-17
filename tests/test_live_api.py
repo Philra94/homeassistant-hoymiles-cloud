@@ -248,3 +248,24 @@ def test_burst_http_401_refreshes_credentials_once_then_recovers_or_requests_rea
             asyncio.run(api.get_burst_data('123'))
     assert refreshed == [True]
     assert session.requests[-1]['kwargs']['headers']['Authorization'] == 'new'
+
+
+def test_burst_scopes_share_uri_without_serializing_their_http_requests():
+    api, session = client([{'status': '0', 'data': SIGNED}])
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+        async def post(uri, *, payload=None):
+            if payload['m'] == 3:
+                started.set()
+                await release.wait()
+                return {'data': {'con': 1, 'mis': []}}
+            return {'data': {'con': 1, 'power': {'pv': 9}}}
+        api._post_live_burst = post
+        pending = asyncio.create_task(api.get_burst_data('123', serials=['A']))
+        await started.wait()
+        assert (await api.get_burst_data('123'))['power']['pv'] == 9
+        assert not pending.done()
+        release.set()
+        await pending
+    asyncio.run(run())
+    assert len(session.requests) == 1

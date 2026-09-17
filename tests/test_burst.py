@@ -185,7 +185,7 @@ def test_stop_cancels_inflight_requests_without_publishing_after_unload():
         api.get_burst_data = hanging
         poller.start()
         poller.start()  # Idempotent; no duplicate loop.
-        assert len(poller._tasks) == 1
+        assert len(poller._tasks) == 2
         await started.wait()
         await poller.stop()
         assert cancelled.is_set()
@@ -244,4 +244,29 @@ def test_auth_failure_cannot_be_undone_by_another_inflight_station():
         release.set()
         await pending
         assert poller.samples == {} and reauths == [True]
+    asyncio.run(run())
+
+
+def test_hanging_inverter_request_does_not_block_station_updates():
+    async def run():
+        poller, api, clock, stations, _, _ = setup()
+        started, release = asyncio.Event(), asyncio.Event()
+        async def read(sid, *, serials=None):
+            if serials:
+                started.set()
+                await release.wait()
+                return api.inverters
+            return api.station
+        api.get_burst_data = read
+        pending = asyncio.create_task(poller.poll_once('one', scope_only='inverters'))
+        await started.wait()
+        await poller.poll_once('one', scope_only='station')
+        assert poller.samples['one']['station'].data['power']['pv'] == 900
+        clock.value += 2
+        api.station = {'con': 1, 'power': {'pv': 1000}}
+        await poller.poll_once('one', scope_only='station')
+        assert poller.samples['one']['station'].data['power']['pv'] == 1000
+        assert not pending.done()
+        release.set()
+        await pending
     asyncio.run(run())

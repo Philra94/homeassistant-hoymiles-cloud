@@ -50,7 +50,7 @@ has a valid sample. Only `rule.port` establishes the number of ports; model name
 
 ## Scheduling and freshness
 
-The opt-in poller has one cancellable loop per station and a two-request limit
+The opt-in poller has independent cancellable station/inverter loops and a two-request limit
 per account. Station and inverter scopes have separate due times, failure counts
 and exponential backoff (10 to 300 seconds). Inverter failures do not delay the
 station's next due time. The effective cadence includes request duration and
@@ -81,7 +81,7 @@ disconnect/recovery, scope-specific backoff, expiry and cancellation. The HA
 late discovery, a slow request racing a newer burst, unchanged slow scheduling,
 disconnect/recovery, authentication failure and unload. Options defaults and
 changes, multi-inverter entities, and two-account storage isolation across reloads
-are also exercised. All 170 standalone tests pass.
+are also exercised. All 172 standalone tests pass.
 
 Three read-only samples on the configured real hybrid account returned `es`,
 `con:1`, `dly:10000`, advancing vendor timestamps and usable PV values through the

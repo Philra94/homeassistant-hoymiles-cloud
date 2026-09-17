@@ -531,6 +531,12 @@ class HoymilesAPI:
             raise LiveDataError("Hoymiles returned incomplete hybrid live data")
         return data
 
+    def _forget_live_uri(self, key: str, failed_uri: str) -> None:
+        """A late failed request must not invalidate another scope's new URL."""
+        if self._live_uris.get(key) == failed_uri:
+            self._live_uris.pop(key, None)
+            self._live_uri_times.pop(key, None)
+
     async def get_burst_data(
         self, station_id: str, *, serials: list[str] | None = None
     ) -> dict[str, Any]:
@@ -542,37 +548,35 @@ class HoymilesAPI:
         key = str(station_id)
         payload = ({"m": 3, "t": 1, "mis": serials} if serials else
                    {"m": 0, "t": 1, "reflux": 0})
-        async with self._live_locks.setdefault(key, asyncio.Lock()):
-            for attempt in range(2):
+        for attempt in range(2):
+            async with self._live_locks.setdefault(key, asyncio.Lock()):
                 uri = self._live_uris.get(key)
                 if uri is None or time.monotonic() - self._live_uri_times.get(key, time.monotonic()) >= 240:
                     uri = await self._get_live_uri(key)
                     self._live_uris[key] = uri
                     self._live_uri_times[key] = time.monotonic()
-                try:
-                    result = await self._post_live_burst(uri, payload=payload)
-                    if not isinstance(result, dict) or ("status" in result and str(result["status"]) != "0"):
-                        raise LiveDataError("Hoymiles live-data request failed")
-                    data = result.get("data", result)
-                    if not isinstance(data, dict):
-                        raise LiveDataError("Hoymiles returned invalid live data")
-                    if not any(isinstance(data.get(field), kind) for field, kind in
-                               (("es", dict), ("power", dict), ("mis", list))) and "con" not in data:
-                        raise LiveDataError("Hoymiles returned incomplete live data")
-                    return data
-                except _BurstUnauthorized:
-                    self._live_uris.pop(key, None)
-                    self._live_uri_times.pop(key, None)
-                    if attempt:
-                        raise LiveDataAuthError("Hoymiles rejected live-data authorization") from None
-                except LiveDataAuthError:
-                    self._live_uris.pop(key, None)
-                    raise
-                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, LiveDataError):
-                    self._live_uris.pop(key, None)
-                    self._live_uri_times.pop(key, None)
-                    if attempt:
-                        raise LiveDataError("Hoymiles live data is unavailable") from None
+            try:
+                result = await self._post_live_burst(uri, payload=payload)
+                if not isinstance(result, dict) or ("status" in result and str(result["status"]) != "0"):
+                    raise LiveDataError("Hoymiles live-data request failed")
+                data = result.get("data", result)
+                if not isinstance(data, dict):
+                    raise LiveDataError("Hoymiles returned invalid live data")
+                if not any(isinstance(data.get(field), kind) for field, kind in
+                           (("es", dict), ("power", dict), ("mis", list))) and "con" not in data:
+                    raise LiveDataError("Hoymiles returned incomplete live data")
+                return data
+            except _BurstUnauthorized:
+                self._forget_live_uri(key, uri)
+                if attempt:
+                    raise LiveDataAuthError("Hoymiles rejected live-data authorization") from None
+            except LiveDataAuthError:
+                self._forget_live_uri(key, uri)
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, LiveDataError):
+                self._forget_live_uri(key, uri)
+                if attempt:
+                    raise LiveDataError("Hoymiles live data is unavailable") from None
         raise LiveDataError("Hoymiles live data is unavailable")
 
     async def _post_bytes(
