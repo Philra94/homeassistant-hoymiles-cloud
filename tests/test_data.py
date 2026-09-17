@@ -775,7 +775,7 @@ def test_burst_charger_power_uses_es_sp_with_fetch_freshness() -> None:
 
     now = datetime(2026, 9, 12, 12, 0, tzinfo=timezone.utc)
     station = _station_with_reflux(pile_power="742", icon_plug=1)
-    station["live_data"] = {"es": {"pp": 742, "sp": 0}, "t": "station local", "dly": 10000}
+    station["live_data"] = {"con": 1, "es": {"pp": 742, "sp": 0}, "t": "station local", "dly": 10000}
     station["live_fetched_at"] = now.timestamp()
     assert has_ev_charger(station) is True
     assert get_ev_charger_power(station, now=now) == 0.0
@@ -798,7 +798,7 @@ def test_live_icon_overrides_legacy_flags_and_rejects_invalid_power() -> None:
 
     now = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
     station = _station_with_reflux(icon_plug=0, pile_power=742)
-    station.update(live_data={"icon": {"pile": 1}, "es": {"sp": 2500}}, live_fetched_at=now.timestamp())
+    station.update(live_data={"con": 1, "icon": {"pile": 1}, "es": {"sp": 2500}}, live_fetched_at=now.timestamp())
     assert has_ev_charger(station) is True
     assert get_ev_charger_power(station, now=now) == 2500
     for value in (-1, float("nan"), float("inf"), "-"):
@@ -816,7 +816,36 @@ def test_live_freshness_respects_configured_scan_interval() -> None:
     from datetime import datetime, timezone
 
     now = datetime(2026, 9, 12, 12, tzinfo=timezone.utc)
-    station = {"live_data": {"icon": {"pile": 1}, "es": {"sp": 50}}, "live_fetched_at": now.timestamp() - 300, "live_max_age": 600}
+    station = {"live_data": {"con": 1, "icon": {"pile": 1}, "es": {"sp": 50}}, "live_fetched_at": now.timestamp() - 300, "live_max_age": 600}
     assert get_ev_charger_power(station, now=now) == 50
     station["live_fetched_at"] = now.timestamp() - 601
     assert get_ev_charger_power(station, now=now) is None
+
+
+@pytest.mark.parametrize('connection', [0, None, '0', '1', -1])
+def test_disconnected_or_unverified_burst_never_publishes_cached_charger_power(connection):
+    from datetime import timezone
+    now = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
+    station = {
+        'live_data': {'con': connection, 'icon': {'pile': 1}, 'es': {'sp': 4100}},
+        'live_fetched_at': now.timestamp(),
+    }
+    assert has_ev_charger(station)
+    assert get_ev_charger_power(station, now=now) is None
+    station['live_data']['con'] = 1
+    station['live_data']['es']['sp'] = 0
+    assert get_ev_charger_power(station, now=now) == 0
+
+
+def test_missing_second_port_is_seeded_independently_of_station_pv2_flag():
+    # #72 supplies the ordinary realtime response, not the separate PV feed.
+    realtime = {'pv2': 0, 'real_power': '34.3'}
+    inventory = {'micro': {'id': 123, 'rule': {'port': 2}}}
+    feed = {'list': [{'key': '1_pv_p', 'val': 34.3}]}
+    seeded = seed_missing_pv_channels(feed, inventory)
+    assert discover_pv_channels(seeded) == [1, 2]
+    assert find_placeholder_pv_channels(seeded) == [2]
+    assert build_station_capabilities(
+        real_time_data=realtime, pv_indicators=seeded,
+        battery_settings={}, microinverters_data=inventory,
+    )['pv_channels'] == [1, 2]

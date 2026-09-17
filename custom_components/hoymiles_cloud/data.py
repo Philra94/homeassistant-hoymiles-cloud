@@ -1106,13 +1106,13 @@ def has_ev_charger(station_data: dict[str, Any] | None) -> bool:
 def get_fresh_live_data(
     station_data: dict[str, Any] | None, *, now: datetime | None = None
 ) -> dict[str, Any] | None:
-    """Return a burst only when this coordinator cycle fetched it recently.
+    """Return a connected burst only when this cycle fetched it recently.
 
     The vendor's ``t`` uses station-local time and ``dly`` is a scheduling hint,
     so neither can establish freshness without a station timezone.
     """
     live = (station_data or {}).get("live_data")
-    if not isinstance(live, dict):
+    if not isinstance(live, dict) or live.get("con") != 1:
         return None
     fetched_at = _optional_float((station_data or {}).get("live_fetched_at"))
     if fetched_at is None:

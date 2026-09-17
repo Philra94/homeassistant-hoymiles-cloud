@@ -7,6 +7,7 @@ The ordinary pytest suite intentionally does not require Home Assistant.
 from __future__ import annotations
 
 import asyncio
+import argparse
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -36,6 +37,7 @@ class FakeAPI:
     fail_station: str | None = None
     auth_failure = False
     include_pv = False
+    station_count = 2
     last_auth_status = "1"
     last_auth_message = "ok"
     last_auth_attempt_summary = "fake"
@@ -55,7 +57,7 @@ class FakeAPI:
         return False
 
     async def get_stations(self):
-        return {"station-a": "A", "station-b": "B"}
+        return {"station-a": "A", "station-b": "B", **{f"station-{i}": f"Station {i}" for i in range(2, self.station_count)}}
 
     async def get_real_time_data(self, station_id):
         if station_id == self.fail_station:
@@ -67,7 +69,7 @@ class FakeAPI:
             raise LiveDataAuthError("fake authorization failure")
         if station_id == self.fail_station:
             raise RuntimeError("fake burst outage")
-        return {"es": {"sp": 0}, "icon": {"pile": 1}}
+        return {"con": 1, "es": {"sp": 0}, "icon": {"pile": 1}}
 
     async def get_pv_indicators(self, station_id):
         if self.include_pv:
@@ -222,4 +224,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--station-count", type=int, default=2)
+    FakeAPI.station_count = max(2, parser.parse_args().station_count)
     asyncio.run(main())
