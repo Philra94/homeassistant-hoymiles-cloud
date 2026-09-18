@@ -2,31 +2,28 @@
 
 This custom integration for Home Assistant allows you to monitor and control your Hoymiles solar inverter system through the Hoymiles Cloud API.
 
-## Release candidate: 1.3.1rc2
+## Stable release: 1.3.1
 
-This prerelease targets **1.3.1** and builds on 1.3.0. It includes Claude's
-single-microinverter port-count discovery work and further telemetry, privacy,
-and lifecycle fixes. See [candidate notes](docs/release-1.3.1rc2.md).
+Version **1.3.1** promotes the tested 1.3.1rc3 implementation to stable. See the
+[release notes](docs/release-1.3.1.md) for validation and known limitations.
 
-- RC2 fixes the missing authorization header on burst requests, verified with
-  read-only live cloud samples. Polling still uses the configured integration
-  interval; dedicated fast PV polling is not included.
-- EV charger power now uses the portal's signed live burst endpoint. The old
-  `pile_power` field can mirror solar output and is no longer used as charger
-  telemetry. An unavailable stream produces an unavailable sensor, not a made-up
-  zero. A fresh live zero remains zero when the station advertises a charger.
-- Optional entities can appear after setup as device data becomes available.
-- Battery commands must pass a settings read and readback verification; an
-  unconfirmed write is reported as a failure.
-- Each configured account has separate draft storage. Existing drafts are copied
-  from legacy storage automatically, without deleting the legacy file.
-- Reauthentication updates the same account. Diagnostics redact the account title
-  and signed URLs as well as credentials and identifiers.
+- EV charger power uses authenticated live burst telemetry instead of the
+  misleading legacy `pile_power` field. Disconnected or unavailable streams
+  produce unavailable readings; connected zero remains zero.
+- Single-microinverter PV channel discovery uses the device's declared port count.
+- Battery commands require readable settings and readback verification.
+- Station failures are isolated, optional entities can appear after setup, and
+  per-account draft storage and same-account reauthentication are supported.
+- Diagnostics redact account details and signed stream URLs.
 
-Install the prerelease only if you want to test these changes. For manual
-installation, extract the release archive's `custom_components/hoymiles_cloud`
-folder into your Home Assistant configuration and restart Home Assistant.
-Preserve a configuration backup if you need to roll back draft edits.
+Update through HACS and restart Home Assistant. Existing entity IDs are retained.
+Keep a configuration backup: rolling back before 1.3.1 does not copy newer
+per-account draft edits back into legacy shared storage.
+
+Dedicated fast PV polling (#69) remains in the separate experimental 1.4.0 release
+line and is not included in 1.3.1. Issues #71 (installer setup) and #72 (another
+missing-PV2 report) remain under investigation; this release does not claim to
+resolve them.
 
 ## Features
 
