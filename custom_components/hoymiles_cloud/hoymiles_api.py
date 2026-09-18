@@ -9,6 +9,7 @@ import json
 import logging
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -26,6 +27,7 @@ from .const import (
     API_STATION_BATTERY_CONFIG_URL,
     API_STATION_DETAILS_URL,
     API_STATION_SETTING_RULE_URL,
+    API_STATION_GET_SD_URI_URL,
     API_REAL_TIME_DATA_URL,
     API_ENERGY_FLOW_STATS_URL,
     API_MICROINVERTERS_URL,
@@ -86,6 +88,14 @@ from .data import (
 from .chart_pb import decode_line_chart
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class LiveDataError(Exception):
+    """Live telemetry is temporarily unavailable or malformed."""
+
+
+class LiveDataAuthError(LiveDataError):
+    """The cloud rejected authentication for live telemetry."""
 
 
 DEFAULT_MODE_SETTINGS: dict[int, dict[str, Any]] = {
@@ -159,6 +169,12 @@ class HoymilesAPI:
         # apart from a genuinely empty list.
         self._fetch_status: Dict[str, Dict[str, Any]] = {}
         self._fetch_failure_keys: set[str] = set()
+        self._live_uris: dict[str, str] = {}
+        self._battery_write_locks: dict[str, asyncio.Lock] = {}
+
+    def _battery_write_lock(self, station_id: str) -> asyncio.Lock:
+        """Serialize read-modify-write commands for one station only."""
+        return self._battery_write_locks.setdefault(str(station_id), asyncio.Lock())
 
     @property
     def device_fetch_status(self) -> Dict[str, Dict[str, Any]]:
@@ -380,7 +396,8 @@ class HoymilesAPI:
     async def _ensure_authenticated(self) -> None:
         """Authenticate if needed before an API request."""
         if not self._token or self.is_token_expired():
-            await self.authenticate()
+            if not await self.authenticate():
+                raise LiveDataAuthError("Hoymiles authentication failed")
 
     async def _post_json(
         self,
@@ -394,9 +411,136 @@ class HoymilesAPI:
         if authenticated:
             await self._ensure_authenticated()
         request_headers = headers or (self._auth_headers() if authenticated else self._json_headers())
-        async with self._session.post(url, headers=request_headers, json=payload) as response:
+        async with self._session.post(
+            url, headers=request_headers, json=payload,
+            timeout=aiohttp.ClientTimeout(total=20),
+        ) as response:
+            status = getattr(response, "status", 200)
+            if status == 401 and authenticated:
+                raise LiveDataAuthError("Hoymiles rejected authentication")
+            if status != 200:
+                raise LiveDataError(f"Hoymiles API request failed with HTTP {status}")
             resp_text = await response.text()
         return json.loads(resp_text)
+
+    @staticmethod
+    def _validate_live_uri(uri: str) -> str:
+        """Accept only Hoymiles' burst endpoint; never reflect a signed URL."""
+        try:
+            parsed = urlsplit(uri)
+            valid = (
+                parsed.scheme == "https"
+                and parsed.hostname == "eurt.hoymiles.com"
+                and parsed.port in (None, 443)
+                and parsed.username is None
+                and parsed.password is None
+                and parsed.path == "/rds/api/0/burst/get"
+                and bool(parsed.query)
+                and not parsed.fragment
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise LiveDataError("Hoymiles returned an invalid live-data endpoint")
+        return uri
+
+    async def _get_live_uri(self, station_id: str) -> str:
+        await self._ensure_authenticated()
+        try:
+            async with self._session.post(
+                API_STATION_GET_SD_URI_URL,
+                headers=self._auth_headers(),
+                json={"sid": int(station_id)},
+                timeout=aiohttp.ClientTimeout(total=10),
+                allow_redirects=False,
+            ) as http_response:
+                if getattr(http_response, "status", 200) == 401:
+                    raise LiveDataAuthError("Hoymiles rejected authentication")
+                if getattr(http_response, "status", 200) != 200:
+                    raise LiveDataError("Hoymiles live-data endpoint request failed")
+                response = await http_response.json()
+        except LiveDataError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError):
+            raise LiveDataError("Unable to obtain Hoymiles live-data endpoint") from None
+        if not isinstance(response, dict):
+            raise LiveDataError("Hoymiles returned invalid live-data response")
+        if str(response.get("status")) != "0":
+            if str(response.get("status")) in {"401"}:
+                raise LiveDataAuthError("Hoymiles rejected live-data authorization")
+            raise LiveDataError("Hoymiles live-data endpoint request failed")
+        data = response.get("data")
+        uri = data if isinstance(data, str) else (
+            data.get("uri")
+            if isinstance(data, dict) else None
+        )
+        if not isinstance(uri, str):
+            raise LiveDataError("Hoymiles returned no live-data endpoint")
+        return self._validate_live_uri(uri)
+
+    async def _post_live_burst(self, uri: str) -> dict[str, Any]:
+        """Post without sharing the authenticated session's cookie jar."""
+        # aiohttp injects CookieJar cookies even when no Cookie header is given.
+        # The stream requires account authorization, but must not inherit cookies.
+        uri = self._validate_live_uri(uri)
+        await self._ensure_authenticated()
+        isolated = isinstance(self._session, aiohttp.ClientSession)
+        session = (
+            aiohttp.ClientSession(
+                connector=self._session.connector,
+                connector_owner=False,
+                cookie_jar=aiohttp.DummyCookieJar(),
+            )
+            if isolated else self._session
+        )
+        try:
+            async with session.post(
+                uri,
+                json={"m": 0, "t": 1, "reflux": 0},
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": self._token,
+                },
+                timeout=aiohttp.ClientTimeout(total=10),
+                allow_redirects=False,
+            ) as response:
+                status = getattr(response, "status", 200)
+                if status != 200:
+                    raise LiveDataError("Hoymiles live-data request failed")
+                return await response.json()
+        finally:
+            if isolated:
+                await session.close()
+
+    async def get_live_data(self, station_id: str) -> dict[str, Any]:
+        """Fetch raw compact burst telemetry through a short-lived signed URI."""
+        key = str(station_id)
+        for attempt in range(2):
+            uri = self._live_uris.get(key)
+            if uri is None:
+                uri = await self._get_live_uri(key)
+                self._live_uris[key] = uri
+            try:
+                result = await self._post_live_burst(uri)
+                if not isinstance(result, dict):
+                    raise LiveDataError("Hoymiles returned invalid live data")
+                if "status" in result and str(result["status"]) != "0":
+                    raise LiveDataError("Hoymiles live-data request failed")
+                data = result.get("data", result)
+                if not isinstance(data, dict):
+                    raise LiveDataError("Hoymiles returned invalid live data")
+                if not isinstance(data.get("es"), dict):
+                    raise LiveDataError("Hoymiles returned incomplete live data")
+                return data
+            except LiveDataAuthError:
+                self._live_uris.pop(key, None)
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, LiveDataError):
+                self._live_uris.pop(key, None)
+                if attempt:
+                    raise LiveDataError("Hoymiles live data is unavailable") from None
+        raise LiveDataError("Hoymiles live data is unavailable")
 
     async def _post_bytes(
         self,
@@ -799,7 +943,8 @@ class HoymilesAPI:
                     )
 
                 salt = self._decode_v3_salt(salt_b64)
-                raw_hash = hash_secret_raw(
+                raw_hash = await asyncio.to_thread(
+                    hash_secret_raw,
                     secret=self._password.encode(),
                     salt=salt,
                     time_cost=3,
@@ -1693,7 +1838,7 @@ class HoymilesAPI:
 
     async def _verify_battery_mode_applied(
         self, station_id: str, mode: int, mode_settings: dict[str, Any]
-    ) -> bool:
+    ) -> bool | None:
         """Re-read the settings and confirm the write actually took effect.
 
         The direct endpoint has been observed answering ``{"status": "0",
@@ -1714,14 +1859,15 @@ class HoymilesAPI:
             if battery_settings_readable(settings):
                 break
         else:
-            # Cannot confirm either way; do not claim the write failed.
+            # An unverified write must not be reported as applied or retried
+            # through another transport (which could submit a duplicate job).
             _LOGGER.debug(
                 "Could not verify battery write for station %s: settings stayed "
                 "unreadable after %s attempts",
                 station_id,
                 BATTERY_WRITE_VERIFY_ATTEMPTS,
             )
-            return True
+            return None
 
         active_mode = (settings.get("data") or {}).get("mode")
         if active_mode != mode:
@@ -1768,8 +1914,11 @@ class HoymilesAPI:
         state back.
         """
         if await self._write_battery_mode_payload(station_id, mode, mode_settings):
-            if await self._verify_battery_mode_applied(station_id, mode, mode_settings):
+            verified = await self._verify_battery_mode_applied(station_id, mode, mode_settings)
+            if verified is True:
                 return True
+            if verified is None:
+                return False
             _LOGGER.debug(
                 "Async battery write for station %s mode %s reported success but "
                 "did not apply; trying the direct endpoint",
@@ -1780,7 +1929,7 @@ class HoymilesAPI:
         if not await self.set_battery_config_direct(station_id, mode, mode_settings):
             return False
 
-        if await self._verify_battery_mode_applied(station_id, mode, mode_settings):
+        if await self._verify_battery_mode_applied(station_id, mode, mode_settings) is True:
             return True
 
         _LOGGER.error(
@@ -1909,6 +2058,10 @@ class HoymilesAPI:
             )
             return None, {}
 
+        if mode not in current_settings.get("available_modes", []):
+            _LOGGER.warning("Battery mode %s is unsupported for station %s", mode, station_id)
+            return None, {}
+
         mode_settings = get_mode_settings(current_settings, mode) or self._default_mode_settings(mode)
 
         if mode == BATTERY_MODE_ECONOMY:
@@ -1933,7 +2086,18 @@ class HoymilesAPI:
             _LOGGER.error("Battery mode settings must be a dictionary")
             return False
 
-        _, current_mode_settings = await self._get_writable_mode_settings(station_id, mode)
+        async with self._battery_write_lock(station_id):
+            return await self._set_battery_mode_settings_locked(
+                station_id, mode, settings, merge=merge
+            )
+
+    async def _set_battery_mode_settings_locked(
+        self, station_id: str, mode: int, settings: dict[str, Any], *, merge: bool
+    ) -> bool:
+        """Apply settings while the caller holds this station's write lock."""
+        current_settings, current_mode_settings = await self._get_writable_mode_settings(station_id, mode)
+        if current_settings is None:
+            return False
         if not current_mode_settings and not settings and mode not in DEFAULT_MODE_SETTINGS:
             return False
 
@@ -1955,16 +2119,19 @@ class HoymilesAPI:
             _LOGGER.error("Invalid battery mode: %s", mode)
             return False
 
-        _, mode_settings = await self._get_writable_mode_settings(station_id, mode)
-        if not mode_settings and mode not in DEFAULT_MODE_SETTINGS:
-            return False
+        async with self._battery_write_lock(station_id):
+            current_settings, mode_settings = await self._get_writable_mode_settings(station_id, mode)
+            if current_settings is None:
+                return False
+            if not mode_settings and mode not in DEFAULT_MODE_SETTINGS:
+                return False
 
-        _LOGGER.info(
-            "Setting battery mode to %s for station ID: %s",
-            BATTERY_MODES.get(mode),
-            station_id,
-        )
-        return await self.apply_battery_mode_payload(station_id, mode, mode_settings)
+            _LOGGER.info(
+                "Setting battery mode to %s for station ID: %s",
+                BATTERY_MODES.get(mode),
+                station_id,
+            )
+            return await self.apply_battery_mode_payload(station_id, mode, mode_settings)
 
     async def set_reserve_soc(self, station_id: str, reserve_soc: int) -> bool:
         """Set battery reserve SOC for a station."""
@@ -1972,22 +2139,21 @@ class HoymilesAPI:
             _LOGGER.error("Invalid reserve SOC value: %s", reserve_soc)
             return False
 
-        current_settings = await self.get_battery_settings(station_id)
-        if not battery_settings_readable(current_settings):
-            _LOGGER.warning(
-                "Skipping reserve SOC update because settings are unavailable for station %s",
-                station_id,
-            )
-            return False
+        async with self._battery_write_lock(station_id):
+            current_settings = await self.get_battery_settings(station_id)
+            if not battery_settings_readable(current_settings):
+                _LOGGER.warning(
+                    "Skipping reserve SOC update because settings are unavailable for station %s",
+                    station_id,
+                )
+                return False
 
-        current_mode = current_settings.get("data", {}).get(
-            "mode", BATTERY_MODE_SELF_CONSUMPTION
-        )
-        return await self.set_battery_mode_settings(
-            station_id,
-            current_mode,
-            {"reserve_soc": reserve_soc},
-        )
+            current_mode = current_settings.get("data", {}).get(
+                "mode", BATTERY_MODE_SELF_CONSUMPTION
+            )
+            return await self._set_battery_mode_settings_locked(
+                station_id, current_mode, {"reserve_soc": reserve_soc}, merge=True
+            )
 
     async def set_peak_shaving_settings(
         self,

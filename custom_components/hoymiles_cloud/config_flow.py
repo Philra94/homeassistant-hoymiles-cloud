@@ -160,6 +160,71 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
+        """Prompt for replacement credentials for an existing account."""
+        self._reauth_entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Validate the new credentials before updating the existing entry."""
+        entry = self._reauth_entry
+        if entry is None:
+            return self.async_abort(reason="unknown")
+        errors: dict[str, str] = {}
+        defaults = {CONF_USERNAME: entry.data[CONF_USERNAME], CONF_PASSWORD: "",
+                    CONF_AUTH_MODE: entry.data.get(CONF_AUTH_MODE, AUTH_MODE_AUTO),
+                    CONF_APP_VERSION: entry.data.get(CONF_APP_VERSION, "")}
+        if user_input is not None:
+            username = user_input[CONF_USERNAME].strip()
+            if username.casefold() != entry.data[CONF_USERNAME].casefold():
+                errors["base"] = "account_mismatch"
+                return self.async_show_form(
+                    step_id="reauth_confirm",
+                    data_schema=_build_user_schema(user_input),
+                    errors=errors,
+                )
+            session = async_get_clientsession(self.hass)
+            api = HoymilesAPI(session, username, user_input[CONF_PASSWORD])
+            api.configure_auth(
+                auth_mode=user_input.get(CONF_AUTH_MODE, AUTH_MODE_AUTO),
+                app_version=user_input.get(CONF_APP_VERSION, "").strip() or None,
+            )
+            try:
+                authenticated = await api.authenticate()
+                if authenticated and not await api.get_stations():
+                    errors["base"] = AUTH_ERROR_NO_ACCESSIBLE_STATIONS
+                elif not authenticated:
+                    errors["base"] = auth_error_to_config_error(api.last_auth_error_key)
+            except Exception as err:
+                _LOGGER.debug("Reauthentication failed: %s", err)
+                errors["base"] = "cannot_connect"
+            if not errors:
+                for other in self.hass.config_entries.async_entries(DOMAIN):
+                    if other.entry_id != entry.entry_id and (
+                        other.unique_id or other.data.get(CONF_USERNAME, "")
+                    ).casefold() == username.casefold():
+                        errors["base"] = "already_configured"
+                        break
+            if not errors:
+                data = dict(entry.data)
+                data.update({CONF_USERNAME: username, CONF_PASSWORD: user_input[CONF_PASSWORD],
+                             CONF_AUTH_MODE: user_input.get(CONF_AUTH_MODE, AUTH_MODE_AUTO)})
+                app_version = user_input.get(CONF_APP_VERSION, "").strip()
+                if app_version:
+                    data[CONF_APP_VERSION] = app_version
+                else:
+                    data.pop(CONF_APP_VERSION, None)
+                self.hass.config_entries.async_update_entry(entry, data=data)
+                await self.hass.config_entries.async_reload(entry.entry_id)
+                return self.async_abort(reason="reauth_successful")
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=_build_user_schema(user_input or defaults),
+            errors=errors,
+        )
+
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for Hoymiles Cloud."""

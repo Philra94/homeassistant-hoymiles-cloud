@@ -50,6 +50,14 @@ REDACT_KEYS = {
     "u",
     "user_name",
     "username",
+    "title",
+    "url",
+    "uri",
+    "signed_url",
+    "sd_uri",
+    "entry_id",
+    "station_id",
+    "station_name",
     # Device and telemetry payloads carry serials/account identifiers under
     # several spellings. They are redacted so the newly added inventory and
     # indicator payloads stay safe to paste into an issue.
@@ -76,6 +84,8 @@ REDACT_KEY_SUFFIXES = (
     "_lng",
     "_latitude",
     "_longitude",
+    "_url",
+    "_uri",
 )
 
 
@@ -120,7 +130,10 @@ def _station_summary(station_data: dict[str, Any]) -> dict[str, Any]:
     """Return a concise station diagnostics summary."""
     devices = station_data.get("devices", {})
     return {
-        "station_info": station_data.get("station_info", {}),
+        "station_info": {
+            key: ("**REDACTED**" if key == "name" else value)
+            for key, value in (station_data.get("station_info") or {}).items()
+        },
         "device_inventory": {
             "dtus": devices.get("dtus", []),
             "inverters": devices.get("inverters", []),
@@ -143,6 +156,7 @@ def _station_summary(station_data: dict[str, Any]) -> dict[str, Any]:
         # grid and load entities exist, so a "missing entities" report cannot
         # be diagnosed without them.
         "real_time_data": station_data.get("real_time_data", {}),
+        "live_data": station_data.get("live_data", {}),
         "pv_indicators": station_data.get("pv_indicators", {}),
         "grid_indicators": station_data.get("grid_indicators", {}),
         "load_indicators": station_data.get("load_indicators", {}),
@@ -202,8 +216,8 @@ async def async_get_config_entry_diagnostics(
             "last_update_success": coordinator.last_update_success,
             "station_count": len(coordinator_data),
             "stations": {
-                station_id: _station_summary(deepcopy(station_data))
-                for station_id, station_data in coordinator_data.items()
+                f"station_{index}": _station_summary(deepcopy(station_data))
+                for index, station_data in enumerate(coordinator_data.values(), 1)
             },
         },
     }

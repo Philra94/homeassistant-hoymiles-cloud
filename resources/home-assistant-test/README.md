@@ -3,6 +3,21 @@
 This directory contains a disposable Home Assistant setup for validating the
 custom component in this repository against the real UI.
 
+## Automated lifecycle smoke check
+
+With Home Assistant 2026.9.2 and `argon2-cffi` installed in a disposable Python
+3.14 environment, run from the repository root:
+
+```bash
+python scripts/validate_homeassistant.py
+```
+
+This uses real Home Assistant coordinator, config-entry, and entity classes with
+fake cloud responses. It checks setup, late discovery, station failure isolation,
+reauthentication, and unloading without cloud credentials or hardware commands.
+It is separate from the HA-free `pytest -q` suite and runs in validation CI.
+It does not replace a real account's UI and hardware acceptance test.
+
 ## Start
 
 ```bash

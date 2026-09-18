@@ -1,6 +1,9 @@
 """Number platform for Hoymiles Cloud integration."""
 from __future__ import annotations
 
+# Coordinator polls and API writes manage their own scheduling.
+PARALLEL_UPDATES = 0
+
 from typing import Any
 
 from homeassistant.components.number import NumberEntity, NumberMode
@@ -12,6 +15,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
+from .discovery import invalidate_control_cache, register_discovery
 from .const import (
     BATTERY_MODE_ECONOMY,
     BATTERY_MODE_FORCE_CHARGE,
@@ -44,164 +48,168 @@ async def async_setup_entry(
     """Set up the Hoymiles number platform."""
     runtime_data = hass.data[DOMAIN][entry.entry_id]
     coordinator = runtime_data["coordinator"]
+    coordinator.invalidate_control_cache = runtime_data["invalidate_control_cache"]
     stations = runtime_data["stations"]
     api = runtime_data["api"]
     update_soc = runtime_data["update_soc"]
     set_schedule_editor_field = runtime_data["set_schedule_editor_field"]
 
-    entities = []
-    for station_id, station_name in stations.items():
-        station_data = coordinator.data.get(station_id, {}) if coordinator.data else {}
-        battery_settings = station_data.get("battery_settings", {})
-        if not battery_settings_writable(battery_settings):
-            continue
+    def build_entities() -> list:
+        entities = []
+        for station_id, station_name in stations.items():
+            station_data = coordinator.data.get(station_id, {}) if coordinator.data else {}
+            battery_settings = station_data.get("battery_settings", {})
+            if not battery_settings_writable(battery_settings):
+                continue
 
-        supported_modes = get_allowed_battery_modes(
-            battery_settings,
-            station_data.get("setting_rules", {}),
-        )
-        for mode in supported_modes:
-            mode_settings = get_mode_settings(battery_settings, mode)
-            if "reserve_soc" in mode_settings:
-                entities.append(
-                    HoymilesBatteryReserveSOC(
-                        coordinator=coordinator,
-                        api=api,
-                        station_id=station_id,
-                        station_name=station_name,
-                        mode=mode,
-                        update_soc_callback=update_soc,
-                    )
-                )
-            if mode in (BATTERY_MODE_FORCE_CHARGE, BATTERY_MODE_FORCE_DISCHARGE) and "max_power" in mode_settings:
-                entities.append(
-                    HoymilesBatteryMaxPower(
-                        coordinator=coordinator,
-                        api=api,
-                        station_id=station_id,
-                        station_name=station_name,
-                        mode=mode,
-                    )
-                )
-
-        peak_settings = get_mode_settings(battery_settings, BATTERY_MODE_PEAK_SHAVING)
-        if peak_settings:
-            if "max_soc" in peak_settings:
-                entities.append(
-                    HoymilesPeakShavingMaxSOC(
-                        coordinator=coordinator,
-                        api=api,
-                        station_id=station_id,
-                        station_name=station_name,
-                    )
-                )
-            if "meter_power" in peak_settings:
-                entities.append(
-                    HoymilesPeakShavingMeterPower(
-                        coordinator=coordinator,
-                        api=api,
-                        station_id=station_id,
-                        station_name=station_name,
-                    )
-                )
-
-        if station_data.get("schedule_editor", {}).get("available_modes"):
-            entities.extend(
-                [
-                    HoymilesScheduleNumberEntity(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        set_schedule_editor_field,
-                        BATTERY_MODE_TIME_OF_USE,
-                        "time_of_use_charge_power",
-                        "Time of Use Charge Power",
-                        _tou_period_path,
-                        "c_power",
-                        0,
-                        100,
-                        1,
-                        PERCENTAGE,
-                    ),
-                    HoymilesScheduleNumberEntity(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        set_schedule_editor_field,
-                        BATTERY_MODE_TIME_OF_USE,
-                        "time_of_use_discharge_power",
-                        "Time of Use Discharge Power",
-                        _tou_period_path,
-                        "dc_power",
-                        0,
-                        100,
-                        1,
-                        PERCENTAGE,
-                    ),
-                    HoymilesScheduleNumberEntity(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        set_schedule_editor_field,
-                        BATTERY_MODE_TIME_OF_USE,
-                        "time_of_use_charge_soc",
-                        "Time of Use Charge SOC",
-                        _tou_period_path,
-                        "charge_soc",
-                        0,
-                        100,
-                        1,
-                        PERCENTAGE,
-                    ),
-                    HoymilesScheduleNumberEntity(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        set_schedule_editor_field,
-                        BATTERY_MODE_TIME_OF_USE,
-                        "time_of_use_discharge_soc",
-                        "Time of Use Discharge SOC",
-                        _tou_period_path,
-                        "dis_charge_soc",
-                        0,
-                        100,
-                        1,
-                        PERCENTAGE,
-                    ),
-                    HoymilesScheduleNumberEntity(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        set_schedule_editor_field,
-                        BATTERY_MODE_ECONOMY,
-                        "economy_duration_in",
-                        "Economy Duration In",
-                        _economy_duration_path,
-                        "in",
-                        0,
-                        100,
-                        0.1,
-                        None,
-                    ),
-                    HoymilesScheduleNumberEntity(
-                        coordinator,
-                        station_id,
-                        station_name,
-                        set_schedule_editor_field,
-                        BATTERY_MODE_ECONOMY,
-                        "economy_duration_out",
-                        "Economy Duration Out",
-                        _economy_duration_path,
-                        "out",
-                        0,
-                        100,
-                        0.1,
-                        None,
-                    ),
-                ]
+            supported_modes = get_allowed_battery_modes(
+                battery_settings,
+                station_data.get("setting_rules", {}),
             )
+            for mode in supported_modes:
+                mode_settings = get_mode_settings(battery_settings, mode)
+                if "reserve_soc" in mode_settings:
+                    entities.append(
+                        HoymilesBatteryReserveSOC(
+                            coordinator=coordinator,
+                            api=api,
+                            station_id=station_id,
+                            station_name=station_name,
+                            mode=mode,
+                            update_soc_callback=update_soc,
+                        )
+                    )
+                if mode in (BATTERY_MODE_FORCE_CHARGE, BATTERY_MODE_FORCE_DISCHARGE) and "max_power" in mode_settings:
+                    entities.append(
+                        HoymilesBatteryMaxPower(
+                            coordinator=coordinator,
+                            api=api,
+                            station_id=station_id,
+                            station_name=station_name,
+                            mode=mode,
+                        )
+                    )
 
-    async_add_entities(entities)
+            peak_settings = get_mode_settings(battery_settings, BATTERY_MODE_PEAK_SHAVING)
+            if peak_settings:
+                if "max_soc" in peak_settings:
+                    entities.append(
+                        HoymilesPeakShavingMaxSOC(
+                            coordinator=coordinator,
+                            api=api,
+                            station_id=station_id,
+                            station_name=station_name,
+                        )
+                    )
+                if "meter_power" in peak_settings:
+                    entities.append(
+                        HoymilesPeakShavingMeterPower(
+                            coordinator=coordinator,
+                            api=api,
+                            station_id=station_id,
+                            station_name=station_name,
+                        )
+                    )
+
+            if station_data.get("schedule_editor", {}).get("available_modes"):
+                entities.extend(
+                    [
+                        HoymilesScheduleNumberEntity(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            set_schedule_editor_field,
+                            BATTERY_MODE_TIME_OF_USE,
+                            "time_of_use_charge_power",
+                            "Time of Use Charge Power",
+                            _tou_period_path,
+                            "c_power",
+                            0,
+                            100,
+                            1,
+                            PERCENTAGE,
+                        ),
+                        HoymilesScheduleNumberEntity(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            set_schedule_editor_field,
+                            BATTERY_MODE_TIME_OF_USE,
+                            "time_of_use_discharge_power",
+                            "Time of Use Discharge Power",
+                            _tou_period_path,
+                            "dc_power",
+                            0,
+                            100,
+                            1,
+                            PERCENTAGE,
+                        ),
+                        HoymilesScheduleNumberEntity(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            set_schedule_editor_field,
+                            BATTERY_MODE_TIME_OF_USE,
+                            "time_of_use_charge_soc",
+                            "Time of Use Charge SOC",
+                            _tou_period_path,
+                            "charge_soc",
+                            0,
+                            100,
+                            1,
+                            PERCENTAGE,
+                        ),
+                        HoymilesScheduleNumberEntity(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            set_schedule_editor_field,
+                            BATTERY_MODE_TIME_OF_USE,
+                            "time_of_use_discharge_soc",
+                            "Time of Use Discharge SOC",
+                            _tou_period_path,
+                            "dis_charge_soc",
+                            0,
+                            100,
+                            1,
+                            PERCENTAGE,
+                        ),
+                        HoymilesScheduleNumberEntity(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            set_schedule_editor_field,
+                            BATTERY_MODE_ECONOMY,
+                            "economy_duration_in",
+                            "Economy Duration In",
+                            _economy_duration_path,
+                            "in",
+                            0,
+                            100,
+                            0.1,
+                            None,
+                        ),
+                        HoymilesScheduleNumberEntity(
+                            coordinator,
+                            station_id,
+                            station_name,
+                            set_schedule_editor_field,
+                            BATTERY_MODE_ECONOMY,
+                            "economy_duration_out",
+                            "Economy Duration Out",
+                            _economy_duration_path,
+                            "out",
+                            0,
+                            100,
+                            0.1,
+                            None,
+                        ),
+                    ]
+                )
+
+        return entities
+
+    register_discovery(coordinator, entry, async_add_entities, build_entities)
 
 
 class HoymilesBatteryNumberEntity(CoordinatorEntity, NumberEntity):
@@ -294,6 +302,7 @@ class HoymilesBatteryReserveSOC(HoymilesBatteryNumberEntity):
             )
 
         await self._update_soc(self._station_id, self._get_storage_key(), int(value))
+        invalidate_control_cache(self.coordinator, self._station_id)
         await self.coordinator.async_request_refresh()
         self.async_write_ha_state()
 
@@ -339,6 +348,7 @@ class HoymilesBatteryMaxPower(HoymilesBatteryNumberEntity):
                 "See the Home Assistant log for the API response."
             )
 
+        invalidate_control_cache(self.coordinator, self._station_id)
         await self.coordinator.async_request_refresh()
         self.async_write_ha_state()
 
@@ -387,6 +397,7 @@ class HoymilesPeakShavingMaxSOC(HoymilesBatteryNumberEntity):
                 "See the Home Assistant log for the API response."
             )
 
+        invalidate_control_cache(self.coordinator, self._station_id)
         await self.coordinator.async_request_refresh()
         self.async_write_ha_state()
 
@@ -435,6 +446,7 @@ class HoymilesPeakShavingMeterPower(HoymilesBatteryNumberEntity):
                 "See the Home Assistant log for the API response."
             )
 
+        invalidate_control_cache(self.coordinator, self._station_id)
         await self.coordinator.async_request_refresh()
         self.async_write_ha_state()
 

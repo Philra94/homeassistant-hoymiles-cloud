@@ -66,6 +66,54 @@ Assistant and the cloud) counts as current, and a response without a usable
 `x_axis` keeps its raw sample so hardware variants that omit the labels still
 work.
 
+## Determining which channels exist
+
+The `port` in `mi_list` is a **per-microinverter** port number, while the PV
+indicators feed exposes **station-level** channel numbers (`1_pv_v`, `2_pv_p`,
+…). Nothing we fetch states how one maps to the other, so the fallback only
+runs where `channel N == port N` is sound — a station with exactly one
+microinverter (issue #56).
+
+The channel list itself cannot come from the indicators feed alone. On some
+firmware a port is omitted from the feed entirely rather than reported with a
+placeholder value, so there is no key to discover and nothing to fill. Observed
+on an HMS-800-2WB (DTU `V01.03.04`, microinverter `V01.03.01`, issue #39):
+
+```json
+"microinverters": {
+  "33820520": {
+    "init_hard_no": "HMS-800-2WB",
+    "rule": { "dev_type": 3, "port": 2 }
+  }
+},
+"pv_indicators": {
+  "pv_total": 1,
+  "list": [
+    { "key": "pv_p_total", "val": 26.1 },
+    { "key": "1_pv_v", "val": 32.7 },
+    { "key": "1_pv_i", "val": 0.8 },
+    { "key": "1_pv_p", "val": 26.1 }
+  ]
+}
+```
+
+`rule.port` in the microinverter detail payload (`/dev/micro/find`, stored
+wholesale in `microinverters[id]`) is the authoritative port count — here `2`,
+against a feed advertising one channel and a `pv_total` of `1`. Note that
+`pv_total` agrees with the truncated feed, not with the hardware, so it is not
+usable for this.
+
+`data.expected_pv_channels()` therefore derives `1..rule.port` from that
+payload, and `data.seed_missing_pv_channels()` inserts placeholder `v`/`i`/`p`
+entries for any channel the feed omits. The omitted channel then looks like any
+other placeholder and is filled by the fallback above. A channel that cannot be
+filled stays unset and reads as unknown rather than borrowing another channel's
+value.
+
+Both functions return nothing for a multi-microinverter station: the mapping
+there is still unknown, and guessing it is the failure mode #53 introduced and
+had to revert.
+
 ## Polling cost
 
 The cloud refreshes plant telemetry only every ~5 minutes, so the coordinator

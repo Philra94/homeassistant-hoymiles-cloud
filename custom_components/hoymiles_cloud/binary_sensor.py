@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# Coordinator polls and API writes manage their own scheduling.
+PARALLEL_UPDATES = 0
+
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -16,8 +19,9 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
+from .discovery import register_discovery
 from .const import DOMAIN
-from .data import is_battery_charging
+from .data import get_grid_connected, is_battery_charging
 from .device import build_primary_battery_device_info, build_station_device_info
 
 
@@ -53,7 +57,7 @@ DESCRIPTIONS: list[HoymilesBinarySensorDescription] = [
         key="grid_connected",
         name="Grid Connected",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
-        value_fn=lambda data: bool(get_reflux_data(data)),
+        value_fn=get_grid_connected,
         exists_fn=lambda data: True,
         device_info_fn=lambda sid, name, data: build_station_device_info(sid, name, data.get("station_info")),
     ),
@@ -87,22 +91,25 @@ async def async_setup_entry(
     coordinator = runtime_data["coordinator"]
     stations = runtime_data["stations"]
 
-    entities: list[BinarySensorEntity] = []
-    for station_id, station_name in stations.items():
-        station_data = get_station_data(coordinator, station_id)
-        for description in DESCRIPTIONS:
-            if description.exists_fn and not description.exists_fn(station_data):
-                continue
-            entities.append(
-                HoymilesBinarySensor(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    description,
+    def build_entities() -> list:
+        entities: list[BinarySensorEntity] = []
+        for station_id, station_name in stations.items():
+            station_data = get_station_data(coordinator, station_id)
+            for description in DESCRIPTIONS:
+                if description.exists_fn and not description.exists_fn(station_data):
+                    continue
+                entities.append(
+                    HoymilesBinarySensor(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        description,
+                    )
                 )
-            )
 
-    async_add_entities(entities)
+        return entities
+
+    register_discovery(coordinator, entry, async_add_entities, build_entities)
 
 
 class HoymilesBinarySensor(CoordinatorEntity, BinarySensorEntity):
@@ -144,6 +151,11 @@ class HoymilesBinarySensor(CoordinatorEntity, BinarySensorEntity):
     def available(self) -> bool:
         """Return whether the entity is available."""
         if not self.coordinator.last_update_success:
+            return False
+        if (
+            self.entity_description.key in {"battery_charging", "grid_connected"}
+            and self._get_station_data().get("telemetry_available") is False
+        ):
             return False
         if self.entity_description.exists_fn:
             return self.entity_description.exists_fn(self._get_station_data())

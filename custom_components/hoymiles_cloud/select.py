@@ -1,6 +1,9 @@
 """Select platform for Hoymiles Cloud integration."""
 from __future__ import annotations
 
+# Coordinator polls and API writes manage their own scheduling.
+PARALLEL_UPDATES = 0
+
 import logging
 from typing import Optional
 
@@ -11,6 +14,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
+from .discovery import invalidate_control_cache, register_discovery
 from .const import BATTERY_MODES, DOMAIN
 from .const import BATTERY_MODE_ECONOMY, BATTERY_MODE_TIME_OF_USE
 from .data import battery_settings_writable, get_allowed_battery_modes
@@ -42,63 +46,67 @@ async def async_setup_entry(
     """Set up Hoymiles Cloud select entities."""
     runtime_data = hass.data[DOMAIN][entry.entry_id]
     coordinator = runtime_data["coordinator"]
+    coordinator.invalidate_control_cache = runtime_data["invalidate_control_cache"]
     stations = runtime_data["stations"]
     api = runtime_data["api"]
     set_schedule_editor_selection = runtime_data["set_schedule_editor_selection"]
 
-    entities = []
-    for station_id, station_name in stations.items():
-        station_data = coordinator.data.get(station_id, {}) if coordinator.data else {}
-        battery_settings = station_data.get("battery_settings", {})
-        if battery_settings_writable(battery_settings) and get_allowed_battery_modes(
-            battery_settings,
-            station_data.get("setting_rules", {}),
-        ):
-            entities.append(
-                HoymilesBatteryModeSelect(
-                    coordinator=coordinator,
-                    api=api,
-                    station_id=station_id,
-                    station_name=station_name,
+    def build_entities() -> list:
+        entities = []
+        for station_id, station_name in stations.items():
+            station_data = coordinator.data.get(station_id, {}) if coordinator.data else {}
+            battery_settings = station_data.get("battery_settings", {})
+            if battery_settings_writable(battery_settings) and get_allowed_battery_modes(
+                battery_settings,
+                station_data.get("setting_rules", {}),
+            ):
+                entities.append(
+                    HoymilesBatteryModeSelect(
+                        coordinator=coordinator,
+                        api=api,
+                        station_id=station_id,
+                        station_name=station_name,
+                    )
                 )
-            )
-        if station_data.get("schedule_editor", {}).get("available_modes"):
-            entities.extend(
-                [
-                    HoymilesScheduleEditorModeSelect(
-                        coordinator=coordinator,
-                        station_id=station_id,
-                        station_name=station_name,
-                        set_selection=set_schedule_editor_selection,
-                    ),
-                    HoymilesTimeOfUsePeriodSelect(
-                        coordinator=coordinator,
-                        station_id=station_id,
-                        station_name=station_name,
-                        set_selection=set_schedule_editor_selection,
-                    ),
-                    HoymilesEconomyWindowSelect(
-                        coordinator=coordinator,
-                        station_id=station_id,
-                        station_name=station_name,
-                        set_selection=set_schedule_editor_selection,
-                    ),
-                    HoymilesEconomyWeekGroupSelect(
-                        coordinator=coordinator,
-                        station_id=station_id,
-                        station_name=station_name,
-                        set_selection=set_schedule_editor_selection,
-                    ),
-                    HoymilesEconomyDurationTypeSelect(
-                        coordinator=coordinator,
-                        station_id=station_id,
-                        station_name=station_name,
-                        set_selection=set_schedule_editor_selection,
-                    ),
-                ]
-            )
+            if station_data.get("schedule_editor", {}).get("available_modes"):
+                entities.extend(
+                    [
+                        HoymilesScheduleEditorModeSelect(
+                            coordinator=coordinator,
+                            station_id=station_id,
+                            station_name=station_name,
+                            set_selection=set_schedule_editor_selection,
+                        ),
+                        HoymilesTimeOfUsePeriodSelect(
+                            coordinator=coordinator,
+                            station_id=station_id,
+                            station_name=station_name,
+                            set_selection=set_schedule_editor_selection,
+                        ),
+                        HoymilesEconomyWindowSelect(
+                            coordinator=coordinator,
+                            station_id=station_id,
+                            station_name=station_name,
+                            set_selection=set_schedule_editor_selection,
+                        ),
+                        HoymilesEconomyWeekGroupSelect(
+                            coordinator=coordinator,
+                            station_id=station_id,
+                            station_name=station_name,
+                            set_selection=set_schedule_editor_selection,
+                        ),
+                        HoymilesEconomyDurationTypeSelect(
+                            coordinator=coordinator,
+                            station_id=station_id,
+                            station_name=station_name,
+                            set_selection=set_schedule_editor_selection,
+                        ),
+                    ]
+                )
 
-    async_add_entities(entities)
+        return entities
+
+    register_discovery(coordinator, entry, async_add_entities, build_entities)
 
 
 class HoymilesBatteryModeSelect(CoordinatorEntity, SelectEntity):
@@ -158,6 +166,7 @@ class HoymilesBatteryModeSelect(CoordinatorEntity, SelectEntity):
                 _LOGGER.error("Failed to set battery mode to %s (ID: %s)", option, mode_id)
                 return
 
+            invalidate_control_cache(self.coordinator, self._station_id)
             await self.coordinator.async_request_refresh()
             self.async_write_ha_state()
             return

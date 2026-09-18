@@ -1,6 +1,9 @@
 """Text entities for the Hoymiles schedule editor."""
 from __future__ import annotations
 
+# Coordinator polls and API writes manage their own scheduling.
+PARALLEL_UPDATES = 0
+
 from typing import Any
 
 from homeassistant.components.text import TextEntity
@@ -10,6 +13,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 
+from .discovery import register_discovery
 from .const import BATTERY_MODE_ECONOMY, BATTERY_MODE_TIME_OF_USE, DOMAIN
 from .schedule_editor import (
     build_device_info,
@@ -34,105 +38,108 @@ async def async_setup_entry(
     stations = runtime_data["stations"]
     set_schedule_editor_field = runtime_data["set_schedule_editor_field"]
 
-    entities = []
-    for station_id, station_name in stations.items():
-        station_data = coordinator.data.get(station_id, {}) if coordinator.data else {}
-        if not station_data.get("schedule_editor", {}).get("available_modes"):
-            continue
-        entities.extend(
-            [
-                HoymilesScheduleTextEntity(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    set_schedule_editor_field,
-                    BATTERY_MODE_TIME_OF_USE,
-                    "time_of_use_charge_start",
-                    "Time of Use Charge Start",
-                    _tou_period_path,
-                    "cs_time",
-                ),
-                HoymilesScheduleTextEntity(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    set_schedule_editor_field,
-                    BATTERY_MODE_TIME_OF_USE,
-                    "time_of_use_charge_end",
-                    "Time of Use Charge End",
-                    _tou_period_path,
-                    "ce_time",
-                ),
-                HoymilesScheduleTextEntity(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    set_schedule_editor_field,
-                    BATTERY_MODE_TIME_OF_USE,
-                    "time_of_use_discharge_start",
-                    "Time of Use Discharge Start",
-                    _tou_period_path,
-                    "dcs_time",
-                ),
-                HoymilesScheduleTextEntity(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    set_schedule_editor_field,
-                    BATTERY_MODE_TIME_OF_USE,
-                    "time_of_use_discharge_end",
-                    "Time of Use Discharge End",
-                    _tou_period_path,
-                    "dce_time",
-                ),
-                HoymilesScheduleTextEntity(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    set_schedule_editor_field,
-                    BATTERY_MODE_ECONOMY,
-                    "economy_start_date",
-                    "Economy Start Date",
-                    _economy_window_path,
-                    "start_date",
-                ),
-                HoymilesScheduleTextEntity(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    set_schedule_editor_field,
-                    BATTERY_MODE_ECONOMY,
-                    "economy_end_date",
-                    "Economy End Date",
-                    _economy_window_path,
-                    "end_date",
-                ),
-                HoymilesScheduleTextEntity(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    set_schedule_editor_field,
-                    BATTERY_MODE_ECONOMY,
-                    "economy_duration_start",
-                    "Economy Duration Start",
-                    _economy_duration_path,
-                    "start_time",
-                ),
-                HoymilesScheduleTextEntity(
-                    coordinator,
-                    station_id,
-                    station_name,
-                    set_schedule_editor_field,
-                    BATTERY_MODE_ECONOMY,
-                    "economy_duration_end",
-                    "Economy Duration End",
-                    _economy_duration_path,
-                    "end_time",
-                ),
-            ]
-        )
+    def build_entities() -> list:
+        entities = []
+        for station_id, station_name in stations.items():
+            station_data = coordinator.data.get(station_id, {}) if coordinator.data else {}
+            if not station_data.get("schedule_editor", {}).get("available_modes"):
+                continue
+            entities.extend(
+                [
+                    HoymilesScheduleTextEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_TIME_OF_USE,
+                        "time_of_use_charge_start",
+                        "Time of Use Charge Start",
+                        _tou_period_path,
+                        "cs_time",
+                    ),
+                    HoymilesScheduleTextEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_TIME_OF_USE,
+                        "time_of_use_charge_end",
+                        "Time of Use Charge End",
+                        _tou_period_path,
+                        "ce_time",
+                    ),
+                    HoymilesScheduleTextEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_TIME_OF_USE,
+                        "time_of_use_discharge_start",
+                        "Time of Use Discharge Start",
+                        _tou_period_path,
+                        "dcs_time",
+                    ),
+                    HoymilesScheduleTextEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_TIME_OF_USE,
+                        "time_of_use_discharge_end",
+                        "Time of Use Discharge End",
+                        _tou_period_path,
+                        "dce_time",
+                    ),
+                    HoymilesScheduleTextEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_ECONOMY,
+                        "economy_start_date",
+                        "Economy Start Date",
+                        _economy_window_path,
+                        "start_date",
+                    ),
+                    HoymilesScheduleTextEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_ECONOMY,
+                        "economy_end_date",
+                        "Economy End Date",
+                        _economy_window_path,
+                        "end_date",
+                    ),
+                    HoymilesScheduleTextEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_ECONOMY,
+                        "economy_duration_start",
+                        "Economy Duration Start",
+                        _economy_duration_path,
+                        "start_time",
+                    ),
+                    HoymilesScheduleTextEntity(
+                        coordinator,
+                        station_id,
+                        station_name,
+                        set_schedule_editor_field,
+                        BATTERY_MODE_ECONOMY,
+                        "economy_duration_end",
+                        "Economy Duration End",
+                        _economy_duration_path,
+                        "end_time",
+                    ),
+                ]
+            )
 
-    async_add_entities(entities)
+        return entities
+
+    register_discovery(coordinator, entry, async_add_entities, build_entities)
 
 
 def _tou_period_path(draft: dict[str, Any]) -> tuple[Any, ...]:
