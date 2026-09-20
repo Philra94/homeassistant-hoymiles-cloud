@@ -3,3 +3,8 @@ __pycache__/
 tmp/*
 .venv/
 .local/
+
+.DS_Store
+.env
+.env.*
+*.local

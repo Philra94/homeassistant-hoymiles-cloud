@@ -2,11 +2,13 @@
 
 This custom integration for Home Assistant allows you to monitor and control your Hoymiles solar inverter system through the Hoymiles Cloud API.
 
-## Release candidates
+## Stable release and release candidate
 
-[1.3.1rc3](docs/release-1.3.1rc3.md) is the maintenance candidate: it includes
-RC2's confirmed charger and PV-channel fixes and rejects disconnected charger
-samples. Stable remains 1.3.0 while the documented release checks are completed.
+Stable is [1.3.1](docs/release-1.3.1.md). Installer setup (#71) and missing PV2
+(#72) have since been confirmed fixed after updating.
+
+[1.4.0rc2](docs/release-1.4.0rc2.md) adds diagnostic privacy fixes to the existing
+experimental release line. It remains a prerelease pending real HMS validation.
 
 [1.4.0rc1](docs/release-1.4.0rc1.md) adds experimental **fast cloud power updates**
 for issue #69 on top of RC3. Enable beta versions in HACS, install this candidate,
@@ -36,7 +38,7 @@ restart Home Assistant, then enable **Enable fast cloud power updates
 Disabling the option reloads the integration and stops all burst requests.
 Burst-only sensors then become unavailable. Existing entity IDs and per-account
 draft storage are preserved. Back up the configuration before testing; restore
-RC3 and restart to remove the feature. New per-entry draft edits are not copied
+1.3.1 and restart to remove the feature. New per-entry draft edits are not copied
 back to the older shared storage when rolling back before 1.3.1.
 
 ## Features

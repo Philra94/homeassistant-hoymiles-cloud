@@ -1189,7 +1189,7 @@ class HoymilesAPI:
                     API_STATIONS_URL, headers=self._auth_headers(), json=data
                 ) as response:
                     resp_text = await response.text()
-                    _LOGGER.debug("Stations response page %s: %s", page_num, resp_text)
+                    _LOGGER.debug("Cloud response received; payload omitted for privacy")
                     resp = json.loads(resp_text)
 
                 if resp.get("status") != "0" or resp.get("message") != "success":
@@ -1223,7 +1223,7 @@ class HoymilesAPI:
 
                 page_num += 1
 
-            _LOGGER.debug("Returning stations dictionary: %s", stations)
+            _LOGGER.debug("Cloud response received; payload omitted for privacy")
             return stations
         except Exception as e:
             _LOGGER.error("Error getting stations: %s", e)
@@ -1407,12 +1407,12 @@ class HoymilesAPI:
         }
         
         try:
-            _LOGGER.debug("Sending request to get microinverters with token: %s...", self._token[:20] if self._token else "None")
+            _LOGGER.debug("Cloud response received; payload omitted for privacy")
             async with self._session.post(
                 API_MICROINVERTERS_URL, headers=self._auth_headers(), json=data
             ) as response:
                 resp_text = await response.text()
-                _LOGGER.debug("Full microinverters response: %s", resp_text)
+                _LOGGER.debug("Cloud response received; payload omitted for privacy")
                 
                 resp = json.loads(resp_text)
                 
@@ -1420,7 +1420,7 @@ class HoymilesAPI:
                     microinverters = {}
                     micro_page = resp.get("data", {}) if isinstance(resp.get("data"), dict) else {}
                     microinverters_data = micro_page.get("list", []) or []
-                    _LOGGER.debug("Raw microinverters data: %s", microinverters_data)
+                    _LOGGER.debug("Cloud response received; payload omitted for privacy")
                     self._record_fetch_status(
                         "microinverters",
                         station_id,
@@ -1451,19 +1451,19 @@ class HoymilesAPI:
                         }
 
                         try:
-                            _LOGGER.debug("Sending request to get microinverters detail with token: %s...", self._token[:20] if self._token else "None")
+                            _LOGGER.debug("Cloud response received; payload omitted for privacy")
                             async with self._session.post(
                                 API_MICRO_DETAIL_URL, headers=self._auth_headers(), json=data
                             ) as response:
                                 resp_text = await response.text()
-                                _LOGGER.debug("Full microinverter %s single detail response: %s", microinverter_id, resp_text)
+                                _LOGGER.debug("Cloud response received; payload omitted for privacy")
                                 
                                 resp = json.loads(resp_text)
                                 
                                 if resp.get("status") == "0" and resp.get("message") == "success":
                                     microinverter_single = {}
                                     microinverter_single_data = resp.get("data", {})
-                                    _LOGGER.debug("Raw single microinverter id %s data: %s", microinverter_id, microinverter_single_data)
+                                    _LOGGER.debug("Cloud response received; payload omitted for privacy")
                                     
                                     if not microinverter_single_data:
                                         # Runs on every static refresh, so warn only
@@ -1481,7 +1481,7 @@ class HoymilesAPI:
                                             station_id,
                                         )
 
-                                    _LOGGER.debug("Adding microinverters: %s - %s", microinverter_id, microinverter_single_data)
+                                    _LOGGER.debug("Cloud response received; payload omitted for privacy")
                                     microinverters[microinverter_id] = microinverter_single_data
 
                                 else:
@@ -1505,7 +1505,7 @@ class HoymilesAPI:
                             _LOGGER.error("Error getting detail of microinverter: %s", e)
                             raise
 
-                    _LOGGER.debug("Returning microinverters dictionary: %s", microinverters)
+                    _LOGGER.debug("Cloud response received; payload omitted for privacy")
                     return microinverters
                 else:
                     self._record_fetch_status(
@@ -1544,9 +1544,9 @@ class HoymilesAPI:
                 try:
                     resp = json.loads(resp_text)
                 except json.JSONDecodeError:
-                    _LOGGER.debug("Real-time data non-JSON response: %s", resp_text)
+                    _LOGGER.debug("Cloud response received; payload omitted for privacy")
                     raise
-                _LOGGER.debug("Real-time data response: %s", json.dumps(resp, ensure_ascii=False))
+                _LOGGER.debug("Cloud response received; payload omitted for privacy")
                 
                 if resp.get("status") == "0" and resp.get("message") == "success":
                     return resp.get("data", {})
@@ -1709,7 +1709,7 @@ class HoymilesAPI:
         ) as response:
             resp_text = await response.text()
 
-        _LOGGER.debug("%s response: %s", log_label, resp_text)
+        _LOGGER.debug("Cloud response received; payload omitted for privacy")
         return json.loads(resp_text)
 
     async def _poll_battery_settings_status(
@@ -1808,7 +1808,7 @@ class HoymilesAPI:
                 result["available_modes"].append(mode_id)
                 result["mode_settings"][mode_id] = deepcopy(mode_data[k_mode])
 
-        _LOGGER.debug("Parsed battery settings: %s", json.dumps(result, indent=2))
+        _LOGGER.debug("Cloud response received; payload omitted for privacy")
         return result
 
     def _merge_mode_settings(
@@ -1841,12 +1841,7 @@ class HoymilesAPI:
                 "data": deepcopy(mode_settings),
             },
         )
-        _LOGGER.debug(
-            "Direct battery write response for station %s mode %s: %s",
-            station_id,
-            mode,
-            json.dumps(response, default=str),
-        )
+        _LOGGER.debug("Cloud settings operation; payload omitted for privacy")
 
         if response.get("status") == "0" and response.get("message") == "success":
             # The endpoint is undocumented and its ``data`` field has been
@@ -1996,11 +1991,7 @@ class HoymilesAPI:
             },
         }
 
-        _LOGGER.debug(
-            "Writing battery mode payload for mode %s: %s",
-            mode,
-            json.dumps(data, indent=2),
-        )
+        _LOGGER.debug("Cloud settings operation; payload omitted for privacy")
 
         try:
             response = await self._submit_battery_settings_command(

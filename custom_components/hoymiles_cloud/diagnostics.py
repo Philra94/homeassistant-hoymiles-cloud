@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from typing import Any
 
 try:
@@ -36,6 +37,22 @@ from .data import (
 )
 
 REDACT_KEYS = {
+    "ak",
+    "access_key",
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "secret",
+    "cookie",
+    "cookies",
+    "session",
+    "session_id",
+    "create_by",
+    "create_by_name",
+    "owner_list",
+    "contact",
     "address",
     "addr",
     "authorization",
@@ -75,6 +92,11 @@ REDACT_KEYS = {
 # Any key ending in one of these is redacted as well, so an unknown field in a
 # telemetry payload cannot leak a serial or an address.
 REDACT_KEY_SUFFIXES = (
+    "_token",
+    "_password",
+    "_secret",
+    "_key",
+    "_cookie",
     "_sn",
     "_addr",
     "_address",
@@ -109,6 +131,11 @@ def _redact_sensitive_keys(value: Any) -> Any:
         }
     if isinstance(value, list):
         return [_redact_sensitive_keys(item) for item in value]
+    if isinstance(value, str) and re.search(
+        r"(?i)(?:\b[\w-]+\.local\b|(?:^|[/\\])\.local(?:[/\\]|$)|(?:^|[/\\])\.env(?:\b|$))",
+        value,
+    ):
+        return "**REDACTED**"
     return value
 
 
