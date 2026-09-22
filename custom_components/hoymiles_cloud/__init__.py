@@ -44,6 +44,7 @@ from .data import (
     build_station_capabilities,
     find_placeholder_pv_channels,
     get_schedule_draft,
+    merge_control_settings,
     merge_missing_pv_channel_values,
     remove_schedule_entry,
     seed_missing_pv_channels,
@@ -637,7 +638,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as err:
             key = (station_id, name)
             log = _LOGGER.debug if key in optional_failures else _LOGGER.warning
-            log("Failed to get %s for station %s: %s", name, station_id, err)
+            log("Failed to get %s for station %s: %r", name, station_id, err)
             optional_failures.add(key)
             return None
         optional_failures.discard((station_id, name))
@@ -694,10 +695,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _optional(station_id, "battery_settings", api.get_battery_settings, 12),
                     _optional(station_id, "relay_settings", api.get_relay_settings, 8),
                 )
-                control_cache[station_id] = {
-                    "battery_settings": battery or {},
-                    "relay_settings": relay or {},
-                }
+                control_cache[station_id] = merge_control_settings(
+                    control_cache.get(station_id), battery, relay
+                )
                 control_cache_at[station_id] = now
             control = control_cache[station_id]
             battery_settings = control["battery_settings"]
