@@ -554,6 +554,30 @@ def relay_settings_writable(relay_settings: dict[str, Any] | None) -> bool:
     return bool(relay_settings and relay_settings.get("writable"))
 
 
+def merge_control_settings(
+    previous: dict[str, Any] | None,
+    battery_settings: dict[str, Any] | None,
+    relay_settings: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge a control-settings refresh into the cached entry.
+
+    ``None`` means that read failed (timeout, transient cloud error). It keeps the
+    previously cached value, so one slow poll does not blank every battery control
+    until the next refresh interval. With nothing cached yet it falls back to ``{}``.
+    """
+    previous = previous or {}
+
+    def pick(key: str, fresh: dict[str, Any] | None) -> dict[str, Any]:
+        if fresh is not None:
+            return fresh
+        return previous.get(key) or {}
+
+    return {
+        "battery_settings": pick("battery_settings", battery_settings),
+        "relay_settings": pick("relay_settings", relay_settings),
+    }
+
+
 def relay_settings_enabled(relay_settings: dict[str, Any] | None) -> bool:
     """Return whether relay automation appears enabled."""
     if not relay_settings_readable(relay_settings):
@@ -1131,6 +1155,10 @@ def get_ev_charger_power(
     """Return verified burst charger watts; missing data is never a zero."""
     if not has_ev_charger(station_data):
         return None
+    if "burst" in (station_data or {}):
+        from .burst import select_power
+        _, value = select_power(station_data, "ev_charger_power")
+        return value
     live = get_fresh_live_data(station_data, now=now)
     es = live.get("es") if live else None
     if not isinstance(es, dict):

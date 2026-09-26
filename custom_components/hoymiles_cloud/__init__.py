@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed
-from homeassistant.const import CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME, Platform
+from homeassistant.const import CONF_PASSWORD, CONF_SCAN_INTERVAL, CONF_USERNAME, EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
@@ -18,7 +18,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
+from .burst import BurstPoller
 from .const import (
+    CONF_FAST_POLLING,
+    DEFAULT_FAST_POLLING,
     AUTH_MODE_AUTO,
     BATTERY_MODE_IDS,
     CONF_APP_VERSION,
@@ -44,6 +47,7 @@ from .data import (
     build_station_capabilities,
     find_placeholder_pv_channels,
     get_schedule_draft,
+    merge_control_settings,
     merge_missing_pv_channel_values,
     remove_schedule_entry,
     seed_missing_pv_channels,
@@ -458,6 +462,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     username = entry.data[CONF_USERNAME]
     password = entry.data[CONF_PASSWORD]
     scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    fast_polling = entry.options.get(CONF_FAST_POLLING, DEFAULT_FAST_POLLING)
+    burst_poller: BurstPoller | None = None
     auth_mode = entry.data.get(CONF_AUTH_MODE, AUTH_MODE_AUTO)
     app_version = entry.data.get(CONF_APP_VERSION)
     fetch_grid_indicators = entry.options.get(
@@ -626,6 +632,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     optional_failures: set[tuple[str, str]] = set()
     control_cache: dict[str, dict[str, Any]] = {}
     control_cache_at: dict[str, float] = {}
+    control_read_fresh: dict[str, bool] = {}
 
     async def _optional(station_id: str, name: str, method: Any, timeout: float = 6) -> Any:
         """A failed optional endpoint cannot fail station telemetry."""
@@ -637,7 +644,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as err:
             key = (station_id, name)
             log = _LOGGER.debug if key in optional_failures else _LOGGER.warning
-            log("Failed to get %s for station %s: %s", name, station_id, err)
+            log("Failed to get %s for station %s: %s", name, station_id, type(err).__name__)
             optional_failures.add(key)
             return None
         optional_failures.discard((station_id, name))
@@ -652,8 +659,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 static_station_cache_at[station_id] = now
             static_payload = static_station_cache.get(station_id, {})
 
-            names = ["real_time_data", "live_data", "pv_indicators", "load_indicators"]
-            methods = [api.get_real_time_data, api.get_live_data, api.get_pv_indicators, api.get_load_indicators]
+            names = ["real_time_data", "pv_indicators", "load_indicators"]
+            methods = [api.get_real_time_data, api.get_pv_indicators, api.get_load_indicators]
+            if not fast_polling:
+                names.append("live_data")
+                methods.append(api.get_live_data)
             if fetch_grid_indicators:
                 names.append("grid_indicators")
                 methods.append(api.get_grid_indicators)
@@ -694,10 +704,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _optional(station_id, "battery_settings", api.get_battery_settings, 12),
                     _optional(station_id, "relay_settings", api.get_relay_settings, 8),
                 )
-                control_cache[station_id] = {
-                    "battery_settings": battery or {},
-                    "relay_settings": relay or {},
-                }
+                control_cache[station_id] = merge_control_settings(
+                    control_cache.get(station_id), battery, relay
+                )
+                control_read_fresh[station_id] = battery is not None
                 control_cache_at[station_id] = now
             control = control_cache[station_id]
             battery_settings = control["battery_settings"]
@@ -752,11 +762,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def async_update_data():
         """Refresh stations independently and keep failed stations unavailable."""
-        if api.is_token_expired() and not await api.authenticate():
+        try:
+            await api._ensure_authenticated()
+        except LiveDataAuthError as err:
             raise ConfigEntryAuthFailed(
-                "Hoymiles authentication failed: "
-                f"{api.last_auth_status} - {api.last_auth_message}"
-            )
+                f"Hoymiles authentication failed: {api.last_auth_status} - {api.last_auth_message}"
+            ) from err
         results = await asyncio.gather(
             *(_station_update(station_id) for station_id in stations),
             return_exceptions=True,
@@ -788,7 +799,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await store.async_save(stored_data)
         if not any(item.get("telemetry_available") for item in refreshed.values()):
             raise UpdateFailed("No station telemetry could be refreshed")
-        return refreshed
+        return attach_burst(refreshed)
+
+    def attach_burst(payloads: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Overlay the latest samples after slow I/O completes, never before it."""
+        if burst_poller is None:
+            return payloads
+        merged = {}
+        for sid, payload in payloads.items():
+            snapshot = dict(burst_poller.samples.get(sid, {}))
+            merged[sid] = {**payload, "burst": snapshot}
+            sample = snapshot.get("station")
+            # Charger discovery uses icon metadata; values still pass freshness
+            # and connection validation in the burst selector.
+            merged[sid]["live_data"] = sample.data if sample else {}
+        return merged
 
     coordinator = DataUpdateCoordinator(
         hass,
@@ -915,9 +940,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise HomeAssistantError("Failed to apply the Hoymiles schedule draft")
 
         control_cache_at.pop(station_id, None)
+        control_read_fresh[station_id] = False
         await coordinator.async_refresh()
-        if not coordinator.last_update_success or not battery_settings_readable(
-            (coordinator.data or {}).get(station_id, {}).get("battery_settings", {})
+        if (
+            not coordinator.last_update_success
+            or not control_read_fresh.get(station_id, False)
+            or not battery_settings_readable(
+                (coordinator.data or {}).get(station_id, {}).get("battery_settings", {})
+            )
         ):
             raise HomeAssistantError(
                 "Schedule write completed, but fresh settings could not be read; the draft was retained"
@@ -949,6 +979,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await _async_register_services(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    if fast_polling:
+        def publish_burst() -> None:
+            if coordinator.data:
+                coordinator.data = attach_burst(coordinator.data)
+                # async_set_updated_data resets the slow refresh timer. Frequent
+                # burst samples would postpone inventory/energy updates forever.
+                coordinator.async_update_listeners()
+
+        def burst_auth_failed() -> None:
+            coordinator.last_update_success = False
+            entry.async_start_reauth_if_available(hass)
+
+        burst_poller = BurstPoller(api, lambda: coordinator.data or {}, publish_burst, burst_auth_failed)
+        hass.data[DOMAIN][entry.entry_id]["burst_poller"] = burst_poller
+        publish_burst()
+        burst_poller.start()
+
+        async def stop_burst_on_shutdown(event) -> None:
+            await burst_poller.stop()
+
+        entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop_burst_on_shutdown))
     original_options = dict(entry.options)
 
     async def options_update_listener(hass: HomeAssistant, updated_entry: ConfigEntry) -> None:
@@ -964,6 +1015,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
+        runtime = hass.data[DOMAIN].get(entry.entry_id, {})
+        if poller := runtime.get("burst_poller"):
+            await poller.stop()
         hass.data[DOMAIN].pop(entry.entry_id, None)
         await _async_unregister_services(hass)
     return unload_ok

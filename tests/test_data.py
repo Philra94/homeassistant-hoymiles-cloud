@@ -23,6 +23,7 @@ get_signed_battery_power = data_module.get_signed_battery_power
 has_ev_charger = data_module.has_ev_charger
 is_battery_charging = data_module.is_battery_charging
 latest_module_values = data_module.latest_module_values
+merge_control_settings = data_module.merge_control_settings
 merge_missing_pv_channel_values = data_module.merge_missing_pv_channel_values
 relay_settings_enabled = data_module.relay_settings_enabled
 seed_missing_pv_channels = data_module.seed_missing_pv_channels
@@ -849,3 +850,46 @@ def test_missing_second_port_is_seeded_independently_of_station_pv2_flag():
         real_time_data=realtime, pv_indicators=seeded,
         battery_settings={}, microinverters_data=inventory,
     )['pv_channels'] == [1, 2]
+
+
+def test_merge_control_settings_keeps_previous_when_a_read_fails() -> None:
+    """A timed-out settings read (None) must not wipe controls that were valid a moment ago (#74)."""
+    previous = {
+        "battery_settings": {"mode": 1, "mode_data": {"1": {"reserve_soc": 10}}},
+        "relay_settings": {"enabled": True},
+    }
+
+    merged = merge_control_settings(previous, None, None)
+
+    assert merged == previous
+
+
+def test_merge_control_settings_replaces_what_was_read_and_keeps_the_rest() -> None:
+    previous = {
+        "battery_settings": {"mode": 1},
+        "relay_settings": {"enabled": True},
+    }
+
+    merged = merge_control_settings(previous, {"mode": 2}, None)
+
+    assert merged == {"battery_settings": {"mode": 2}, "relay_settings": {"enabled": True}}
+
+
+def test_merge_control_settings_without_cache_falls_back_to_empty() -> None:
+    assert merge_control_settings(None, None, None) == {
+        "battery_settings": {},
+        "relay_settings": {},
+    }
+    assert merge_control_settings(None, {"mode": 1}, {}) == {
+        "battery_settings": {"mode": 1},
+        "relay_settings": {},
+    }
+
+
+def test_control_cache_explicit_denial_clears_previous_permissions():
+    previous = {"battery_settings": {"readable": True, "writable": True},
+                "relay_settings": {"readable": True, "writable": True}}
+    denied = {"readable": False, "writable": False, "message": "No Permission"}
+    assert merge_control_settings(previous, denied, {}) == {
+        "battery_settings": denied, "relay_settings": {}}
+    assert previous["battery_settings"]["writable"] is True

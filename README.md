@@ -2,28 +2,45 @@
 
 This custom integration for Home Assistant allows you to monitor and control your Hoymiles solar inverter system through the Hoymiles Cloud API.
 
-## Stable release: 1.3.1
+## Stable release and release candidate
 
-Version **1.3.1** promotes the tested 1.3.1rc3 implementation to stable. See the
-[release notes](docs/release-1.3.1.md) for validation and known limitations.
+Stable is [1.3.1](docs/release-1.3.1.md). Installer setup (#71) and missing PV2
+(#72) have since been confirmed fixed after updating.
 
-- EV charger power uses authenticated live burst telemetry instead of the
-  misleading legacy `pile_power` field. Disconnected or unavailable streams
-  produce unavailable readings; connected zero remains zero.
-- Single-microinverter PV channel discovery uses the device's declared port count.
-- Battery commands require readable settings and readback verification.
-- Station failures are isolated, optional entities can appear after setup, and
-  per-account draft storage and same-account reauthentication are supported.
-- Diagnostics redact account details and signed stream URLs.
+[1.4.0rc3](docs/release-1.4.0rc3.md) retains cached controls after settings timeouts
+and requires fresh readback before replacing a schedule draft. It includes RC2
+privacy fixes and remains a prerelease pending real HMS validation.
 
-Update through HACS and restart Home Assistant. Existing entity IDs are retained.
-Keep a configuration backup: rolling back before 1.3.1 does not copy newer
-per-account draft edits back into legacy shared storage.
+[1.4.0rc1](docs/release-1.4.0rc1.md) adds experimental **fast cloud power updates**
+for issue #69 on top of RC3. Enable beta versions in HACS, install this candidate,
+restart Home Assistant, then enable **Enable fast cloud power updates
+(experimental)** in the integration's options. It is **off by default**.
 
-Dedicated fast PV polling (#69) remains in the separate experimental 1.4.0 release
-line and is not included in 1.3.1. Issues #71 (installer setup) and #72 (another
-missing-PV2 report) remain under investigation; this release does not claim to
-resolve them.
+- Station PV Power and hybrid EV Charger Power use a separate burst poller.
+  Cadence follows the server: HMS users reported 2–3 seconds; our hybrid test
+  returned 10 seconds. Network latency and account size can increase the interval.
+- Single-microinverter PV channel power and its complete string-power total use
+  burst readings while keeping existing entity IDs. Each
+  identified microinverter gains an AC Power sensor. Multi-microinverter stations
+  gain explicitly addressed per-inverter PV power sensors; existing station
+  channels are not remapped or renumbered.
+- Voltage, current, temperature, energy totals, battery/grid/load readings and
+  settings keep their existing sources and ordinary polling interval. No battery
+  controls or energy-counter semantics change.
+- Valid zero remains zero. Disconnected or stale stream data becomes unavailable,
+  not an invented zero. A transport failure falls back to ordinary PV readings
+  where available; burst-only inverter sensors become unavailable. Recovery
+  automatically restores burst readings. Known offline readings cannot fall back
+  to cached slow power.
+- EU burst endpoints are supported. Consumer-specific MS-A2 endpoints and other
+  regions have not been validated. HMS power mapping is covered by source
+  comparison and synthetic tests; real HMS validation remains required.
+
+Disabling the option reloads the integration and stops all burst requests.
+Burst-only sensors then become unavailable. Existing entity IDs and per-account
+draft storage are preserved. Back up the configuration before testing; restore
+1.3.1 and restart to remove the feature. New per-entry draft edits are not copied
+back to the older shared storage when rolling back before 1.3.1.
 
 ## Features
 
