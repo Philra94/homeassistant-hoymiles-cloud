@@ -281,6 +281,26 @@ async def main() -> None:
             # must retain the user's draft even if the old coordinator data
             # had readable settings. This checks an awaited refresh occurs.
             runtime = hass.data[DOMAIN][entry.entry_id]
+            # Cache a valid settings read, then reproduce an outer timeout.
+            with patch.object(runtime["api"], "get_battery_settings", AsyncMock(return_value={"readable": True, "writable": True})):
+                runtime["invalidate_control_cache"]("station-a")
+                await coordinator.async_refresh()
+            with patch.object(runtime["api"], "get_battery_settings", AsyncMock(side_effect=TimeoutError())):
+                runtime["invalidate_control_cache"]("station-a")
+                await coordinator.async_refresh()
+                assert coordinator.data["station-a"]["battery_settings"]["readable"]
+                coordinator.data["station-a"]["schedule_editor"] = {
+                    "modes": {8: {"validation_errors": [], "draft": {"periods": []}}}}
+                try:
+                    await runtime["apply_schedule_draft"]("station-a", 8)
+                except HomeAssistantError as err:
+                    assert "draft was retained" in str(err)
+                else:
+                    raise AssertionError("cached settings accepted as fresh write readback")
+            with patch.object(runtime["api"], "get_battery_settings", AsyncMock(return_value={"readable": False, "writable": False})):
+                runtime["invalidate_control_cache"]("station-a")
+                await coordinator.async_refresh()
+                assert not coordinator.data["station-a"]["battery_settings"]["readable"]
             station = coordinator.data["station-a"]
             station["battery_settings"] = {"readable": True}
             station["schedule_editor"] = {

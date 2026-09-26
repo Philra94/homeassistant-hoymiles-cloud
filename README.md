@@ -7,8 +7,9 @@ This custom integration for Home Assistant allows you to monitor and control you
 Stable is [1.3.1](docs/release-1.3.1.md). Installer setup (#71) and missing PV2
 (#72) have since been confirmed fixed after updating.
 
-[1.4.0rc2](docs/release-1.4.0rc2.md) adds diagnostic privacy fixes to the existing
-experimental release line. It remains a prerelease pending real HMS validation.
+[1.4.0rc3](docs/release-1.4.0rc3.md) retains cached controls after settings timeouts
+and requires fresh readback before replacing a schedule draft. It includes RC2
+privacy fixes and remains a prerelease pending real HMS validation.
 
 [1.4.0rc1](docs/release-1.4.0rc1.md) adds experimental **fast cloud power updates**
 for issue #69 on top of RC3. Enable beta versions in HACS, install this candidate,
