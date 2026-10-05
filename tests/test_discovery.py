@@ -47,3 +47,40 @@ def test_register_discovery_deduplicates_batch_and_retries_failed_add() -> None:
         raise AssertionError("first late setup should fail")
     listeners[0]()
     assert calls == [["initial"], ["same"], ["same"]]
+
+
+def test_parent_resolution_is_account_scoped_and_does_not_mutate_info(monkeypatch):
+    discovery = load_integration_module("discovery")
+    calls = []
+    def create(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(id="parent-" + kwargs["config_entry_id"])
+    monkeypatch.setattr(discovery, "dr", SimpleNamespace(
+        async_get_device_id_by_identifier=object(),
+        async_get=lambda hass: SimpleNamespace(async_get_or_create=create)))
+    source = {"identifiers": {("hoymiles_cloud", "battery-test")},
+              "via_device": ("hoymiles_cloud", "station-test")}
+    for account in ("account-a", "account-b"):
+        entity = SimpleNamespace(_attr_device_info=source)
+        discovery.resolve_via_device(SimpleNamespace(hass=object()), SimpleNamespace(entry_id=account), entity)
+        assert entity._attr_device_info["via_device_id"] == "parent-" + account
+        assert "via_device" not in entity._attr_device_info
+    assert "via_device" in source
+    assert [call["config_entry_id"] for call in calls] == ["account-a", "account-b"]
+
+
+def test_legacy_registry_retains_compatible_parent_field(monkeypatch):
+    discovery = load_integration_module("discovery")
+    monkeypatch.setattr(discovery, "dr", SimpleNamespace())
+    entity = SimpleNamespace(_attr_device_info={"via_device": ("hoymiles_cloud", "station-test")})
+    discovery.resolve_via_device(None, None, entity)
+    assert entity._attr_device_info == {"via_device": ("hoymiles_cloud", "station-test")}
+
+
+def test_parent_resolution_omits_self_reference(monkeypatch):
+    discovery = load_integration_module("discovery")
+    monkeypatch.setattr(discovery, "dr", SimpleNamespace(async_get_device_id_by_identifier=object()))
+    identifier = ("hoymiles_cloud", "station-test")
+    entity = SimpleNamespace(_attr_device_info={"identifiers": {identifier}, "via_device": identifier})
+    discovery.resolve_via_device(None, None, entity)
+    assert entity._attr_device_info == {"identifiers": {identifier}}

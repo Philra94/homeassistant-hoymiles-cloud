@@ -173,6 +173,28 @@ async def main() -> None:
         # Register without async_add's automatic integration loader setup; this
         # script drives the integration entry directly under patched transport.
         hass.config_entries._entries[entry.entry_id] = entry
+        # Exercise real account-scoped parent resolution, independent of platform order.
+        from types import SimpleNamespace
+        from homeassistant.helpers.entity import Entity
+        from custom_components.hoymiles_cloud.discovery import resolve_via_device
+        if hasattr(dr, "async_get_device_id_by_identifier"):
+            other_entry = make_entry("parent-check@example.test")
+            hass.config_entries._entries[other_entry.entry_id] = other_entry
+            parent_ids = []
+            for owner in (entry, other_entry):
+                child = Entity()
+                child._attr_device_info = {
+                    "identifiers": {(DOMAIN, "synthetic-child")},
+                    "via_device": (DOMAIN, "synthetic-parent"),
+                }
+                resolve_via_device(SimpleNamespace(hass=hass), owner, child)
+                info = child.device_info
+                assert "via_device" not in info
+                registered = dr.async_get(hass).async_get_or_create(
+                    config_entry_id=owner.entry_id, **info)
+                assert registered.via_device_id == info["via_device_id"]
+                parent_ids.append(info["via_device_id"])
+            assert parent_ids[0] != parent_ids[1]
         options = config_flow.OptionsFlowHandler(entry)
         options.hass, options.handler = hass, entry.entry_id
         form = await options.async_step_init()
