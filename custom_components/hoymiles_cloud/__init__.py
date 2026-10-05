@@ -698,8 +698,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if module_values:
                         pv_indicators = merge_missing_pv_channel_values(pv_indicators, module_values)
 
-            if (station_id not in control_cache or
-                    now - control_cache_at.get(station_id, 0) >= DEFAULT_STATIC_REFRESH_INTERVAL):
+            if (station_id not in control_cache or station_id not in control_cache_at or
+                    now - control_cache_at[station_id] >= DEFAULT_STATIC_REFRESH_INTERVAL):
                 battery, relay = await asyncio.gather(
                     _optional(station_id, "battery_settings", api.get_battery_settings, 12),
                     _optional(station_id, "relay_settings", api.get_relay_settings, 8),

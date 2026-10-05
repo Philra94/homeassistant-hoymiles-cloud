@@ -11,6 +11,12 @@ field. Existing device identifiers and entity IDs are unchanged. This continues
 the 1.4.0 RC line and includes RC2 privacy and RC3 control-cache/readback fixes.
 Previous release tags and artifacts are unchanged.
 
+Forced control refresh now also works before 300 seconds of system uptime; an
+absent refresh timestamp is treated as invalidated regardless of the monotonic
+clock value. A fixed-clock lifecycle regression covers this case. Removed the
+redundant aiohttp manifest requirement to satisfy current Hassfest validation;
+Home Assistant supplies aiohttp.
+
 Validation: 180 standalone tests pass, including account scoping, self-reference
 and legacy compatibility. Home Assistant 2026.9.2 lifecycle validation with 15
 synthetic stations exercises real registry creation for two accounts. No live
