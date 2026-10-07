@@ -43,6 +43,7 @@ from .data import (
     get_energy_flow_value,
     get_ev_charger_power,
     get_indicator_value,
+    get_module_measurement,
     get_mode_settings,
     get_pv_indicator_value,
     get_schedule_modes,
@@ -692,15 +693,16 @@ async def async_setup_entry(
                     ]
                 )
 
-            if "burst" in station_data:
-                targets = inverter_targets(station_data)
-                for serial, count in targets.items():
+            targets = inverter_targets(station_data)
+            multiple = len(station_data.get("devices", {}).get("microinverters", {})) > 1
+            for serial, count in targets.items():
+                if "burst" in station_data:
                     entities.append(HoymilesBurstInverterSensor(coordinator, station_id, station_name, serial))
-                    # Multi-device ports get explicit serial-based IDs. Never
-                    # guess a mapping onto existing station PV channel numbers.
-                    if len(station_data.get("devices", {}).get("microinverters", {})) > 1:
-                        for port in range(1, count + 1):
-                            entities.append(HoymilesBurstInverterSensor(coordinator, station_id, station_name, serial, port))
+                if multiple and ("burst" in station_data or station_data.get("module_data")):
+                    for port in range(1, count + 1):
+                        entities.append(HoymilesBurstInverterSensor(coordinator, station_id, station_name, serial, port))
+                        for metric in ("v", "i"):
+                            entities.append(HoymilesModuleSensor(coordinator, station_id, station_name, serial, port, metric))
 
             channels = set(discover_pv_channels(station_data.get("pv_indicators", {})))
             if "burst" in station_data and len(station_data.get("devices", {}).get("microinverters", {})) == 1:
@@ -1171,11 +1173,33 @@ class HoymilesBurstInverterSensor(HoymilesBaseSensor):
 
     @property
     def native_value(self) -> float | None:
-        return select_power(self._get_station_data(), "pv_power", serial=self._serial, port=self._port)[1]
+        station = self._get_station_data()
+        handled, value = select_power(station, "pv_power", serial=self._serial, port=self._port)
+        if handled or self._port is None:
+            return value
+        return get_module_measurement(station, self._serial, self._port, "MODULE_POWER")
 
     @property
     def available(self) -> bool:
-        return self.native_value is not None
+        return self.coordinator.last_update_success and self.native_value is not None
+
+
+class HoymilesModuleSensor(HoymilesBurstInverterSensor):
+    """Device-addressed DC voltage/current from the module chart."""
+
+    def __init__(self, coordinator, station_id, station_name, serial, port, metric):
+        super().__init__(coordinator, station_id, station_name, serial, port)
+        self._metric = "MODULE_V" if metric == "v" else "MODULE_I"
+        label, unit, device_class, precision = HoymilesPVChannelSensor._METRIC_CONFIG[metric]
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_micro_{serial}_pv{port}_{metric}"
+        self._attr_name = f"{station_name} {serial} PV{port} {label}"
+        self._attr_native_unit_of_measurement = unit
+        self._attr_device_class = device_class
+        self._attr_suggested_display_precision = precision
+
+    @property
+    def native_value(self) -> float | None:
+        return get_module_measurement(self._get_station_data(), self._serial, self._port, self._metric)
 
 
 class HoymilesGridIndicatorSensor(HoymilesBaseSensor):

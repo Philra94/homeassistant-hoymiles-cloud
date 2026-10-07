@@ -88,6 +88,7 @@ class StationData:
     telemetry_available: bool = False
     energy_flow: dict[str, Any] = field(default_factory=dict)
     pv_indicators: dict[str, Any] = field(default_factory=dict)
+    module_data: dict[int, dict[int, dict[str, float | None]]] = field(default_factory=dict)
     grid_indicators: dict[str, Any] = field(default_factory=dict)
     load_indicators: dict[str, Any] = field(default_factory=dict)
     battery_settings: dict[str, Any] = field(default_factory=dict)

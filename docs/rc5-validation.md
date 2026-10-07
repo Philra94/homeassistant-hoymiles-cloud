@@ -32,3 +32,24 @@
 - No full Home Assistant UI validation was performed for this change. Cloud grid
   measurements and station-level multi-device PV channel mapping remain unresolved;
   these changes do not establish that all user variants of #77/#78 are fixed.
+
+## Device-addressed module sensors
+
+Subsequent read-only investigation found a complete, unique device/port layout
+for both affected demo stations (7 and 16 modules). No field identifies the legacy
+station-wide PV channel number. Individual module charts provide DC measurements;
+the official frontend's separate microinverter voltage/frequency charts returned
+no series for the tested current and previous days. No replacement grid readings
+are claimed.
+
+The coordinator now retains its already device-addressed chart samples for sensor
+use. Multi-inverter DC voltage/current/power entities use inverter serial and port,
+including with fast polling disabled. Existing burst power entity IDs are reused.
+Burst offline/stale verdicts still suppress chart power; AC power is never replaced
+with DC module power. Only missing/placeholder station PV totals use aggregation.
+
+Validation: 204 HA-free tests pass. The Home Assistant 2026.9.2 lifecycle smoke was
+extended with multi-inverter module telemetry and run with fast polling off and on.
+It checks device-specific voltage/current, power source precedence, absent samples,
+offline suppression, discovery, authentication handling and unload. These are
+synthetic HA checks, not installation testing on the affected users' systems.

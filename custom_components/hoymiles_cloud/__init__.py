@@ -706,9 +706,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if module_values:
                         pv_indicators = merge_missing_pv_channel_values(pv_indicators, module_values)
 
+            module_data = {}
             # Multi-device station channels cannot be mapped to individual
             # ports, but a complete set of DC module powers can be summed.
-            if (placeholders and len(microinverters) > 1
+            if (len(microinverters) > 1
                     and not static_payload.get("devices", {}).get("inverters")):
                 targets = microinverter_module_targets(microinverters)
                 try:
@@ -718,9 +719,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )), timeout=5)
                 except asyncio.TimeoutError:
                     samples = []
-                pv_indicators = merge_microinverter_pv_total(
-                    pv_indicators, targets, dict(zip(targets, samples))
-                )
+                module_data = dict(zip(targets, samples))
+                if placeholders or not pv_indicators.get("list"):
+                    pv_indicators = merge_microinverter_pv_total(
+                        pv_indicators, targets, module_data
+                    )
 
             if (station_id not in control_cache or station_id not in control_cache_at or
                     now - control_cache_at[station_id] >= DEFAULT_STATIC_REFRESH_INTERVAL):
@@ -752,6 +755,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 telemetry_available=bool(real_time_data or live_data),
                 energy_flow=EnergyFlow(energy_flow).as_dict(),
                 pv_indicators=pv_indicators,
+                module_data=module_data,
                 grid_indicators=grid_indicators,
                 load_indicators=load_indicators,
                 battery_settings=enhanced_battery_settings,

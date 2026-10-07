@@ -272,3 +272,12 @@ PV channel numbers remain ambiguous on these installations. An observed empty
 PV/grid template during generation is reported as missing data rather than real
 zero measurements. This does not supply grid voltage/current readings that the
 cloud omits. Grid frequency also accepts the cloud's `grid_f` field.
+
+Multi-microinverter stations also expose DC power, voltage and current per
+identified inverter/port without enabling fast polling. Power entities retain the
+same IDs when fast polling is enabled; fresh burst power takes precedence, while
+an explicitly offline/stale burst does not resurrect chart power. Voltage and
+current remain chart measurements. The chart refresh is cached for 240 seconds,
+and failed reads do not borrow another device's values. These sensors do not
+rename or remap existing station-level PV channels. No additional services or
+write permissions are introduced.

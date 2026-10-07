@@ -141,6 +141,12 @@
       },
       "burst_pv_power": {
         "name": "Microinverter PV Power"
+      },
+      "module_voltage": {
+        "name": "Microinverter PV Voltage"
+      },
+      "module_current": {
+        "name": "Microinverter PV Current"
       }
     },
     "select": {

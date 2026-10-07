@@ -83,7 +83,7 @@ class FakeAPI:
         return {"con": 1, "es": {"sp": 0}, "icon": {"pile": 1}}
 
     async def get_microinverters_by_stations(self, station_id):
-        if not self.fast_polling:
+        if not self.fast_polling and station_id != "station-b":
             return {}
         micros = {"a": {"sn": "micro-a", "id": 1, "rule": {"port": 2}}}
         if station_id == "station-b":
@@ -99,6 +99,9 @@ class FakeAPI:
                              **{f"p{port}": 100 + port * 10 + index * 100 for port in range(1, 5)}}
                             for index, serial in enumerate(serials)]}
         return {"con": self.burst_connection, "dly": 60000, "power": {"pv": self.burst_watts}}
+
+    async def get_module_channel_data(self, station_id, mi_id, port, **kwargs):
+        return {"MODULE_POWER": mi_id * 100 + port, "MODULE_V": 30 + mi_id, "MODULE_I": port}
 
     async def get_pv_indicators(self, station_id):
         if self.include_pv:
@@ -237,6 +240,23 @@ async def main() -> None:
             assert set(entities) == {platform.value for platform in PLATFORMS}
             base_counts = {key: len(value) for key, value in entities.items()}
             assert entities["sensor"], "real sensor entities were not constructed"
+
+            module_voltage = next(e for e in entities["sensor"] if e.unique_id == f"{DOMAIN}_station-b_micro_micro-b_pv4_v")
+            module_current = next(e for e in entities["sensor"] if e.unique_id == f"{DOMAIN}_station-b_micro_micro-b_pv4_i")
+            module_power = next(e for e in entities["sensor"] if e.unique_id == f"{DOMAIN}_station-b_micro_micro-b_pv4_power")
+            assert module_voltage.native_value == 32 and module_voltage.available
+            assert module_current.native_value == 4 and module_current.available
+            if not FakeAPI.fast_polling:
+                assert module_power.native_value == 204 and module_power.available
+                # Failed new chart reads must not resurrect old device values.
+                saved = coordinator.data["station-b"]["module_data"]
+                coordinator.data["station-b"]["module_data"] = {}
+                assert module_power.native_value is None and not module_voltage.available
+                coordinator.data["station-b"]["module_data"] = saved
+                from custom_components.hoymiles_cloud.burst import Sample
+                coordinator.data["station-b"]["burst"] = {"inverters": Sample({}, 0, 0, 10, "offline")}
+                assert module_power.native_value is None and not module_power.available
+                del coordinator.data["station-b"]["burst"]
 
             if FakeAPI.fast_polling:
                 poller = hass.data[DOMAIN][entry.entry_id]["burst_poller"]

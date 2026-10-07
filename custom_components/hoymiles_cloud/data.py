@@ -1332,3 +1332,24 @@ def merge_microinverter_pv_total(
     result = deepcopy(pv)
     _replace_indicator_value(result.setdefault("list", []), "pv_p_total", total, replace_zero=True)
     return result
+
+
+def get_module_measurement(station: dict[str, Any], serial: str, port: int, metric: str) -> float | None:
+    """Resolve a sample by a unique serial and declared physical port."""
+    matches = [item for item in station.get("devices", {}).get("microinverters", {}).values()
+               if isinstance(item, dict) and (item.get("sn") or item.get("micro_sn")) == serial]
+    if len(matches) != 1:
+        return None
+    device = matches[0]
+    count = get_microinverter_port_count(device)
+    if count is None or not 1 <= port <= count:
+        return None
+    try:
+        device_id = int(device["id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    raw = station.get("module_data", {}).get(device_id, {}).get(port, {}).get(metric)
+    if isinstance(raw, bool):
+        return None
+    value = _optional_float(raw)
+    return value if value is not None and math.isfinite(value) and value >= 0 else None

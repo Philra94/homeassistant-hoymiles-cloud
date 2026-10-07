@@ -959,3 +959,22 @@ def test_module_targets_require_complete_inventory():
 def test_grid_frequency_accepts_backend_key_and_preserves_legacy_key():
     assert data_module.get_indicator_value({'list': [{'key': 'grid_f', 'val': 50}]}, 'frequency') == 50
     assert data_module.get_indicator_value({'list': [{'key': 'frequency', 'val': 60}, {'key': 'grid_f', 'val': 50}]}, 'frequency') == 60
+
+
+def test_module_measurements_use_device_identity_not_inventory_order():
+    station = {'devices': {'microinverters': {
+        'b': {'id': 2, 'sn': 'synthetic-b', 'rule': {'port': 2}},
+        'a': {'id': 1, 'sn': 'synthetic-a', 'rule': {'port': 2}},
+    }}, 'module_data': {1: {1: {'MODULE_V': 31, 'MODULE_POWER': 100}},
+                       2: {1: {'MODULE_V': 42, 'MODULE_POWER': 200}}}}
+    get = data_module.get_module_measurement
+    assert get(station, 'synthetic-a', 1, 'MODULE_V') == 31
+    assert get(station, 'synthetic-b', 1, 'MODULE_POWER') == 200
+    assert get(station, 'unknown', 1, 'MODULE_V') is None
+    assert get(station, 'synthetic-a', 2, 'MODULE_V') is None
+    assert get(station, 'synthetic-a', 3, 'MODULE_V') is None
+    for value in [None, True, -1, float('nan'), float('inf')]:
+        station['module_data'][1][1]['MODULE_V'] = value
+        assert get(station, 'synthetic-a', 1, 'MODULE_V') is None
+    station['devices']['microinverters']['duplicate'] = {'id': 3, 'sn': 'synthetic-b', 'rule': {'port': 2}}
+    assert get(station, 'synthetic-b', 1, 'MODULE_POWER') is None
