@@ -820,3 +820,90 @@ def test_battery_write_is_not_claimed_applied_when_verification_is_unreadable() 
     api._token_expires_at = 9999999999
 
     assert asyncio.run(api.set_battery_mode("123", 1)) is False
+
+@pytest.mark.parametrize('kind', ['battery', 'relay'])
+@pytest.mark.parametrize('failure', ['timeout', 'transport', 'pending', 'expired_job'])
+def test_settings_transient_failure_preserves_cache(kind, failure):
+    from unittest.mock import AsyncMock
+    import aiohttp
+    data = load_integration_module('data')
+    api = HoymilesAPI(FakeSession([]), 'example', 'example')
+    api._token = 'synthetic'
+    api._token_expires_at = 9999999999
+    api._ensure_authenticated = AsyncMock()
+    if failure in ('timeout', 'transport'):
+        error = TimeoutError() if failure == 'timeout' else aiohttp.ClientConnectionError()
+        api._submit_battery_settings_command = AsyncMock(side_effect=error)
+    else:
+        api._submit_battery_settings_command = AsyncMock(return_value={
+            'status': '0' if failure == 'pending' else 'timeout',
+            'message': 'success' if failure == 'pending' else 'Timed out',
+            'data': {'code': 2},
+        })
+    async def optional_read():
+        try:
+            return await getattr(api, f'get_{kind}_settings')('1')
+        except hoymiles_api_module.SettingsReadError:
+            return None
+    result = asyncio.run(optional_read())
+    assert result is None
+    previous = {f'{kind}_settings': {'readable': True, 'writable': True, 'data': {'mode': 1}}}
+    assert data.merge_control_settings(previous, None, None)[f'{kind}_settings'] == previous[f'{kind}_settings']
+
+
+@pytest.mark.parametrize('kind', ['battery', 'relay'])
+def test_settings_denial_still_revokes_cached_permissions(kind):
+    from unittest.mock import AsyncMock
+    data = load_integration_module('data')
+    api = HoymilesAPI(FakeSession([]), 'example', 'example')
+    api._ensure_authenticated = AsyncMock()
+    api._submit_battery_settings_command = AsyncMock(return_value={
+        'status': '3', 'message': 'No Permission.', 'data': {'code': 2},
+    })
+    result = asyncio.run(getattr(api, f'get_{kind}_settings')('1'))
+    previous = {f'{kind}_settings': {'readable': True, 'writable': True}}
+    merged = data.merge_control_settings(previous, result if kind == 'battery' else None,
+                                        result if kind == 'relay' else None)
+    assert not merged[f'{kind}_settings']['writable']
+
+
+def test_settings_reads_serialize_the_complete_job():
+    from unittest.mock import AsyncMock
+    api = HoymilesAPI(FakeSession([]), 'example', 'example')
+    api._ensure_authenticated = AsyncMock()
+    async def run():
+        active = 0
+        peak = 0
+        async def submit(*args, **kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return {'status': '0', 'message': 'success', 'data': 'synthetic-job'}
+        async def resolve(*args, **kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return {'status': '0', 'message': 'success', 'data': {'code': 0, 'data': {'mode': 1, 'data': {}}}}
+        api._submit_battery_settings_command = submit
+        api._resolve_battery_settings_command = resolve
+        results = await asyncio.gather(api.get_battery_settings('1'), api.get_relay_settings('1'))
+        assert all(item['readable'] for item in results)
+        assert peak == 1
+    asyncio.run(run())
+
+
+def test_write_verification_retries_transient_reads_without_duplicate_write():
+    from unittest.mock import AsyncMock
+    api = HoymilesAPI(FakeSession([]), 'example', 'example')
+    api.get_battery_settings = AsyncMock(side_effect=[
+        hoymiles_api_module.SettingsReadError('pending'),
+        hoymiles_api_module.SettingsReadError('timeout'),
+        hoymiles_api_module.SettingsReadError('timeout'),
+    ])
+    assert asyncio.run(api._verify_battery_mode_applied('1', 1, {})) is None
+    assert api.get_battery_settings.await_count == 3
+    assert api._session.requests == []

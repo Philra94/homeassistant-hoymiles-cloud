@@ -893,3 +893,69 @@ def test_control_cache_explicit_denial_clears_previous_permissions():
     assert merge_control_settings(previous, denied, {}) == {
         "battery_settings": denied, "relay_settings": {}}
     assert previous["battery_settings"]["writable"] is True
+
+
+def _micro_placeholder_payloads():
+    return ({'list': [{'key': 'pv_p_total', 'val': '0'},
+                      *({'key': f'1_pv_{metric}', 'val': '-'} for metric in ('v', 'i', 'p'))]},
+            {'list': [{'key': key, 'val': '0'} for key in ('grid_state', 'grid_f', 'v_a', 'p_total')]})
+
+
+def test_micro_empty_template_is_unknown_while_station_generates():
+    pv, grid = _micro_placeholder_payloads()
+    result, normalized_grid = data_module.normalize_microinverter_placeholders(
+        pv, grid, {'microinverters': {'one': {}}}, {'real_power': 200})
+    assert data_module.get_indicator_value(result, 'pv_p_total') is None
+    assert all(item['val'] is None for item in normalized_grid['list'])
+    assert pv['list'][0]['val'] == '0'
+    assert grid['list'][0]['val'] == '0'
+
+
+@pytest.mark.parametrize('devices,power', [
+    ({'microinverters': {'one': {}}, 'inverters': [{}]}, 200),
+    ({'microinverters': {'one': {}}, 'batteries': [{}]}, 200),
+    ({'microinverters': {'one': {}}}, 0),
+    ({'microinverters': {'one': {}}}, None),
+    ({'microinverters': {'one': {}}}, float('nan')),
+    ({}, 200),
+])
+def test_micro_template_filter_preserves_other_station_cases(devices, power):
+    pv, grid = _micro_placeholder_payloads()
+    assert data_module.normalize_microinverter_placeholders(pv, grid, devices, {'real_power': power}) == (pv, grid)
+
+
+def test_real_zero_grid_export_is_preserved():
+    pv, grid = _micro_placeholder_payloads()
+    grid['list'][2]['val'] = 230
+    _, result = data_module.normalize_microinverter_placeholders(
+        pv, grid, {'microinverters': {'one': {}}}, {'real_power': 200})
+    assert data_module.get_indicator_value(result, 'p_total') == '0'
+
+
+def test_multi_device_pv_total_uses_every_port_without_mapping_channels():
+    targets = data_module.microinverter_module_targets({
+        'first': {'id': 1, 'rule': {'port': 2}}, 'second': {'id': 2, 'rule': {'port': 1}},
+    })
+    assert targets == {1: [1, 2], 2: [1]}
+    values = {1: {1: {'MODULE_POWER': 10}, 2: {'MODULE_POWER': 20}}, 2: {1: {'MODULE_POWER': 30}}}
+    pv, _ = _micro_placeholder_payloads()
+    result = data_module.merge_microinverter_pv_total(pv, targets, values)
+    assert data_module.get_indicator_value(result, 'pv_p_total') == 60
+    assert data_module.get_indicator_value(result, '1_pv_p') == '-'
+    assert pv['list'][0]['val'] == '0'
+    # A missing or invalid port must never yield a plausible partial total.
+    for invalid in (None, float('nan'), float('inf'), -1):
+        values[1][2]['MODULE_POWER'] = invalid
+        assert data_module.merge_microinverter_pv_total(pv, targets, values) == pv
+    del values[1][2]
+    assert data_module.merge_microinverter_pv_total(pv, targets, values) == pv
+
+
+def test_module_targets_require_complete_inventory():
+    assert data_module.microinverter_module_targets({'one': {'id': 1, 'rule': {'port': 2}}, 'two': {}}) == {}
+    assert data_module.microinverter_module_targets({'one': {'id': True, 'rule': {'port': 2}}}) == {}
+
+
+def test_grid_frequency_accepts_backend_key_and_preserves_legacy_key():
+    assert data_module.get_indicator_value({'list': [{'key': 'grid_f', 'val': 50}]}, 'frequency') == 50
+    assert data_module.get_indicator_value({'list': [{'key': 'frequency', 'val': 60}, {'key': 'grid_f', 'val': 50}]}, 'frequency') == 60

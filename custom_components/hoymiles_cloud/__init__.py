@@ -46,6 +46,9 @@ from .data import (
     build_schedule_payload_from_draft,
     build_station_capabilities,
     find_placeholder_pv_channels,
+    normalize_microinverter_placeholders,
+    microinverter_module_targets,
+    merge_microinverter_pv_total,
     get_schedule_draft,
     merge_control_settings,
     merge_missing_pv_channel_values,
@@ -515,9 +518,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     static_station_cache: dict[str, dict[str, Any]] = {}
     static_station_cache_at: dict[str, float] = {}
-    module_data_cache: dict[tuple[str, int], dict[str, float | None]] = {}
-    module_data_cache_at: dict[tuple[str, int], float] = {}
-    module_data_failures: set[tuple[str, int]] = set()
+    module_data_cache: dict[tuple[str, int, int], dict[str, float | None]] = {}
+    module_data_cache_at: dict[tuple[str, int, int], float] = {}
+    module_data_failures: set[tuple[str, int, int]] = set()
     request_limit = asyncio.Semaphore(4)
 
     async def _async_module_values(
@@ -532,7 +535,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         of on every coordinator poll. That keeps the extra requests off the
         shared 30 second update budget.
         """
-        def _log_failure(cache_key: tuple[str, int], reason: Any) -> None:
+        def _log_failure(cache_key: tuple[str, int, int], reason: Any) -> None:
             """Warn once per outage, then stay at debug.
 
             This path runs on every poll, so an endpoint that is simply
@@ -540,15 +543,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             """
             message = "Failed to get module channel data for station %s port %s: %s"
             if cache_key in module_data_failures:
-                _LOGGER.debug(message, cache_key[0], cache_key[1], reason)
+                _LOGGER.debug(message, cache_key[0], cache_key[2], reason)
                 return
             module_data_failures.add(cache_key)
-            _LOGGER.warning(message, cache_key[0], cache_key[1], reason)
+            _LOGGER.warning(message, cache_key[0], cache_key[2], reason)
 
         values_by_channel: dict[int, dict[str, float | None]] = {}
         now = time.monotonic()
         for channel in channels:
-            cache_key = (station_id, channel)
+            cache_key = (station_id, mi_id, channel)
             cached = module_data_cache.get(cache_key)
             if (
                 cached is not None
@@ -559,9 +562,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     values_by_channel[channel] = cached
                 continue
             try:
-                values = await api.get_module_channel_data(
-                    station_id, mi_id, channel, now=dt_util.now()
-                )
+                async with request_limit:
+                    values = await api.get_module_channel_data(
+                        station_id, mi_id, channel, now=dt_util.now()
+                    )
             except Exception as err:
                 _log_failure(cache_key, err)
                 continue
@@ -683,6 +687,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             live_fetched_at = time.time() if live_data else None
             pv_indicators = payloads.get("pv_indicators") or {}
             microinverters = static_payload.get("devices", {}).get("microinverters", {})
+            grid_indicators = payloads.get("grid_indicators") or {}
+            pv_indicators, grid_indicators = normalize_microinverter_placeholders(
+                pv_indicators, grid_indicators, static_payload.get("devices", {}), real_time_data
+            )
             pv_indicators = seed_missing_pv_channels(pv_indicators, microinverters)
             placeholders = find_placeholder_pv_channels(pv_indicators)
             if placeholders and len(microinverters) == 1:
@@ -698,12 +706,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if module_values:
                         pv_indicators = merge_missing_pv_channel_values(pv_indicators, module_values)
 
+            # Multi-device station channels cannot be mapped to individual
+            # ports, but a complete set of DC module powers can be summed.
+            if (placeholders and len(microinverters) > 1
+                    and not static_payload.get("devices", {}).get("inverters")):
+                targets = microinverter_module_targets(microinverters)
+                try:
+                    samples = await asyncio.wait_for(asyncio.gather(*(
+                        _async_module_values(station_id, device_id, ports)
+                        for device_id, ports in targets.items()
+                    )), timeout=5)
+                except asyncio.TimeoutError:
+                    samples = []
+                pv_indicators = merge_microinverter_pv_total(
+                    pv_indicators, targets, dict(zip(targets, samples))
+                )
+
             if (station_id not in control_cache or station_id not in control_cache_at or
                     now - control_cache_at[station_id] >= DEFAULT_STATIC_REFRESH_INTERVAL):
-                battery, relay = await asyncio.gather(
-                    _optional(station_id, "battery_settings", api.get_battery_settings, 12),
-                    _optional(station_id, "relay_settings", api.get_relay_settings, 8),
-                )
+                # Both actions use the same device command queue. Give each
+                # read its own deadline after the preceding job finishes.
+                battery = await _optional(station_id, "battery_settings", api.get_battery_settings, 12)
+                relay = await _optional(station_id, "relay_settings", api.get_relay_settings, 8)
                 control_cache[station_id] = merge_control_settings(
                     control_cache.get(station_id), battery, relay
                 )
@@ -712,7 +736,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             control = control_cache[station_id]
             battery_settings = control["battery_settings"]
             relay_settings = control["relay_settings"]
-            grid_indicators = payloads.get("grid_indicators") or {}
             load_indicators = payloads.get("load_indicators") or {}
             energy_flow = payloads.get("energy_flow") or {}
             eps_profit = payloads.get("eps_profit") or {}

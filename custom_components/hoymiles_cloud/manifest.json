@@ -13,5 +13,5 @@
     "argon2-cffi>=21.3.0"
   ],
   "single_config_entry": false,
-  "version": "1.4.0rc4"
+  "version": "1.4.0rc5"
 }

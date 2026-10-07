@@ -258,3 +258,17 @@ For bugs or feature requests, please [open an issue on GitHub](https://github.co
 ## Disclaimer
 
 This integration is not affiliated with, endorsed by, or connected to Hoymiles Power Electronics Inc. This is a third-party integration developed for personal use.
+
+### RC5 fixes for settings and microinverter telemetry
+
+Transient battery/relay read failures retain the last successfully read settings;
+explicit access denials still remove writable controls. Settings reads for a
+station are serialized through completion of their cloud jobs.
+
+For stations with multiple microinverters, missing PV total power can be recovered
+from the module charts only when every device and port has a valid power sample.
+These are DC measurements; station AC production is not substituted. Station-level
+PV channel numbers remain ambiguous on these installations. An observed empty
+PV/grid template during generation is reported as missing data rather than real
+zero measurements. This does not supply grid voltage/current readings that the
+cloud omits. Grid frequency also accepts the cloud's `grid_f` field.

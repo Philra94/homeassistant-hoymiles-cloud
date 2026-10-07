@@ -143,6 +143,10 @@ def _values_match(actual: Any, expected: Any) -> bool:
         return str(actual) == str(expected)
 
 
+class SettingsReadError(Exception):
+    """A settings read failed without establishing account permissions."""
+
+
 class HoymilesAPI:
     """Hoymiles Cloud API client."""
 
@@ -178,6 +182,7 @@ class HoymilesAPI:
         self._live_locks: dict[str, asyncio.Lock] = {}
         self._authentication_lock = asyncio.Lock()
         self._battery_write_locks: dict[str, asyncio.Lock] = {}
+        self._settings_read_locks: dict[str, asyncio.Lock] = {}
 
     def _battery_write_lock(self, station_id: str) -> asyncio.Lock:
         """Serialize read-modify-write commands for one station only."""
@@ -1608,6 +1613,11 @@ class HoymilesAPI:
         return latest_module_values(chart, now=now)
 
     async def get_battery_settings(self, station_id: str) -> Dict[str, Any]:
+        """Serialize device settings reads through completion of the cloud job."""
+        async with self._settings_read_locks.setdefault(str(station_id), asyncio.Lock()):
+            return await self._read_battery_settings(station_id)
+
+    async def _read_battery_settings(self, station_id: str) -> Dict[str, Any]:
         """Get battery settings for a station."""
         if self.is_token_expired():
             await self._ensure_authenticated()
@@ -1625,16 +1635,17 @@ class HoymilesAPI:
                 expect_result=True,
                 command_label=f"battery settings read for station {station_id}",
             )
-        except json.JSONDecodeError as err:
-            _LOGGER.warning("Error decoding battery settings JSON: %s", err)
-            return build_empty_battery_settings(message="Invalid battery settings response")
-        except Exception as err:
-            _LOGGER.warning("Error checking battery settings status: %s", err)
-            return build_empty_battery_settings(message="Unable to read battery settings")
+        except (asyncio.TimeoutError, aiohttp.ClientError, json.JSONDecodeError) as err:
+            raise SettingsReadError("Transient settings read failure") from err
 
         return self._parse_battery_settings_response(final_response)
 
     async def get_relay_settings(self, station_id: str) -> dict[str, Any]:
+        """Serialize device settings reads through completion of the cloud job."""
+        async with self._settings_read_locks.setdefault(str(station_id), asyncio.Lock()):
+            return await self._read_relay_settings(station_id)
+
+    async def _read_relay_settings(self, station_id: str) -> dict[str, Any]:
         """Get relay / dry-contact settings for a station."""
         await self._ensure_authenticated()
         try:
@@ -1651,12 +1662,8 @@ class HoymilesAPI:
                 expect_result=True,
                 command_label=f"relay settings read for station {station_id}",
             )
-        except json.JSONDecodeError as err:
-            _LOGGER.warning("Error decoding relay settings JSON: %s", err)
-            return build_empty_relay_settings(message="Invalid relay settings response")
-        except Exception as err:
-            _LOGGER.warning("Error checking relay settings status: %s", err)
-            return build_empty_relay_settings(message="Unable to read relay settings")
+        except (asyncio.TimeoutError, aiohttp.ClientError, json.JSONDecodeError) as err:
+            raise SettingsReadError("Transient settings read failure") from err
 
         return self._parse_relay_settings_response(final_response)
 
@@ -1666,6 +1673,14 @@ class HoymilesAPI:
 
     def _parse_relay_settings_response(self, response: dict[str, Any]) -> dict[str, Any]:
         """Normalize a completed relay settings response."""
+        data = response.get("data")
+        if response.get("status") == "timeout" or (
+            response.get("status") == "0"
+            and response.get("message") == "success"
+            and isinstance(data, dict)
+            and data.get("code") == BATTERY_SETTINGS_STATUS_RUNNING
+        ):
+            raise SettingsReadError("Settings read is still pending")
         if response.get("status") != "0" or response.get("message") != "success":
             return build_empty_relay_settings(
                 status=str(response.get("status")),
@@ -1768,6 +1783,14 @@ class HoymilesAPI:
 
     def _parse_battery_settings_response(self, response: dict[str, Any]) -> dict[str, Any]:
         """Normalize a completed battery settings response."""
+        data = response.get("data")
+        if response.get("status") == "timeout" or (
+            response.get("status") == "0"
+            and response.get("message") == "success"
+            and isinstance(data, dict)
+            and data.get("code") == BATTERY_SETTINGS_STATUS_RUNNING
+        ):
+            raise SettingsReadError("Settings read is still pending")
         if response.get("status") != "0" or response.get("message") != "success":
             return build_empty_battery_settings(
                 status=str(response.get("status")),
@@ -1887,7 +1910,10 @@ class HoymilesAPI:
         for attempt in range(BATTERY_WRITE_VERIFY_ATTEMPTS):
             if attempt:
                 await asyncio.sleep(BATTERY_WRITE_VERIFY_DELAY)
-            settings = await self.get_battery_settings(station_id)
+            try:
+                settings = await self.get_battery_settings(station_id)
+            except SettingsReadError:
+                continue
             if battery_settings_readable(settings):
                 break
         else:
