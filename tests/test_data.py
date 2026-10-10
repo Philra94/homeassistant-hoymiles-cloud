@@ -978,3 +978,34 @@ def test_module_measurements_use_device_identity_not_inventory_order():
         assert get(station, 'synthetic-a', 1, 'MODULE_V') is None
     station['devices']['microinverters']['duplicate'] = {'id': 3, 'sn': 'synthetic-b', 'rule': {'port': 2}}
     assert get(station, 'synthetic-b', 1, 'MODULE_POWER') is None
+
+
+@pytest.mark.parametrize('direction', ['in', 'out'])
+@pytest.mark.parametrize('period', ['today_eq', 'month_eq', 'year_eq', 'total_eq'])
+def test_grid_energy_prefers_explicit_counter_family(direction, period):
+    # Synthetic, deliberately different counters reproduce issue #80.
+    reflux = {f'grid_{direction}_eq': {period: '12345.5'},
+              f'mb_{direction}_eq': {period: '456'}, f'meter_b_{direction}_eq': '789'}
+    station = {'real_time_data': {'reflux_station_data': reflux}}
+    assert data_module.get_grid_energy(station, direction, period) == 12345.5
+    reflux[f'grid_{direction}_eq'][period] = '0'
+    assert data_module.get_grid_energy(station, direction, period) == 0
+    for invalid in [None, '-', '', 'nan', 'inf', '-1', True]:
+        reflux[f'grid_{direction}_eq'][period] = invalid
+        assert data_module.get_grid_energy(station, direction, period) is None
+    for missing in [{}, None, []]:
+        reflux[f'grid_{direction}_eq'] = missing
+        assert data_module.get_grid_energy(station, direction, period) is None
+    del reflux[f'grid_{direction}_eq']
+    expected = 789 if period == 'today_eq' else 456
+    assert data_module.get_grid_energy(station, direction, period) == expected
+    del reflux[f'meter_b_{direction}_eq']
+    assert data_module.get_grid_energy(station, direction, period) == 456
+
+
+def test_grid_energy_does_not_mix_import_and_export():
+    station = {'real_time_data': {'reflux_station_data': {
+        'grid_in_eq': {'total_eq': '100'}, 'grid_out_eq': {'total_eq': '200'}}}}
+    assert data_module.get_grid_energy(station, 'in', 'total_eq') == 100
+    assert data_module.get_grid_energy(station, 'out', 'total_eq') == 200
+    assert data_module.get_grid_energy({}, 'in', 'total_eq') is None

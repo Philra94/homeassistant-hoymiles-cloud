@@ -1353,3 +1353,28 @@ def get_module_measurement(station: dict[str, Any], serial: str, port: int, metr
         return None
     value = _optional_float(raw)
     return value if value is not None and math.isfinite(value) and value >= 0 else None
+
+
+def get_grid_energy(station: dict[str, Any], direction: str, period: str) -> float | None:
+    """Use explicit grid counters, retaining legacy-only API compatibility.
+
+    Select a counter family, not the first nonzero value. A missing/invalid
+    period in an advertised grid family must not switch to a different meter.
+    All source counters are Wh; no unit conversion is needed here.
+    """
+    if direction not in {"in", "out"} or period not in {"today_eq", "month_eq", "year_eq", "total_eq"}:
+        return None
+    reflux = _reflux_data(station)
+    explicit = f"grid_{direction}_eq"
+    if explicit in reflux:
+        family = reflux[explicit]
+        raw = family.get(period) if isinstance(family, dict) else None
+    elif period == "today_eq" and f"meter_b_{direction}_eq" in reflux:
+        raw = reflux[f"meter_b_{direction}_eq"]
+    else:
+        family = reflux.get(f"mb_{direction}_eq")
+        raw = family.get(period) if isinstance(family, dict) else None
+    if isinstance(raw, bool):
+        return None
+    value = _optional_float(raw)
+    return value if value is not None and math.isfinite(value) and value >= 0 else None

@@ -241,6 +241,23 @@ async def main() -> None:
             base_counts = {key: len(value) for key, value in entities.items()}
             assert entities["sensor"], "real sensor entities were not constructed"
 
+            # Exercise all eight real sensor descriptions with distinct,
+            # synthetic grid and legacy meter counters (issue #80).
+            station = coordinator.data["station-a"]
+            saved_real = station["real_time_data"]
+            station["real_time_data"] = {"reflux_station_data": {
+                "grid_in_eq": {p: 100 for p in ("today_eq", "month_eq", "year_eq", "total_eq")},
+                "grid_out_eq": {p: 200 for p in ("today_eq", "month_eq", "year_eq", "total_eq")},
+                "mb_in_eq": {p: 300 for p in ("today_eq", "month_eq", "year_eq", "total_eq")},
+                "mb_out_eq": {p: 400 for p in ("today_eq", "month_eq", "year_eq", "total_eq")},
+                "meter_b_in_eq": 500, "meter_b_out_eq": 600,
+            }}
+            for direction, expected in (("import", 100), ("export", 200)):
+                for suffix in ("energy_today", "month", "year", "total"):
+                    entity = next(e for e in entities["sensor"] if e.unique_id == f"{DOMAIN}_station-a_grid_{direction}_{suffix}")
+                    assert entity.native_value == expected
+            station["real_time_data"] = saved_real
+
             module_voltage = next(e for e in entities["sensor"] if e.unique_id == f"{DOMAIN}_station-b_micro_micro-b_pv4_v")
             module_current = next(e for e in entities["sensor"] if e.unique_id == f"{DOMAIN}_station-b_micro_micro-b_pv4_i")
             module_power = next(e for e in entities["sensor"] if e.unique_id == f"{DOMAIN}_station-b_micro_micro-b_pv4_power")
