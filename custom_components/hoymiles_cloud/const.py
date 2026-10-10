@@ -2,6 +2,9 @@
 
 DOMAIN = "hoymiles_cloud"
 
+CONF_FAST_POLLING = "fast_polling"
+DEFAULT_FAST_POLLING = False
+
 # Storage constants
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}_data"

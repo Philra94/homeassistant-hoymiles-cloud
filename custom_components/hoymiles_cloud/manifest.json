@@ -10,9 +10,8 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/Philra94/homeassistant-hoymiles-cloud/issues",
   "requirements": [
-    "aiohttp>=3.8.0",
     "argon2-cffi>=21.3.0"
   ],
   "single_config_entry": false,
-  "version": "1.3.1"
+  "version": "1.4.0rc5"
 }

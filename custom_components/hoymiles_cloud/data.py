@@ -554,6 +554,30 @@ def relay_settings_writable(relay_settings: dict[str, Any] | None) -> bool:
     return bool(relay_settings and relay_settings.get("writable"))
 
 
+def merge_control_settings(
+    previous: dict[str, Any] | None,
+    battery_settings: dict[str, Any] | None,
+    relay_settings: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Merge a control-settings refresh into the cached entry.
+
+    ``None`` means that read failed (timeout, transient cloud error). It keeps the
+    previously cached value, so one slow poll does not blank every battery control
+    until the next refresh interval. With nothing cached yet it falls back to ``{}``.
+    """
+    previous = previous or {}
+
+    def pick(key: str, fresh: dict[str, Any] | None) -> dict[str, Any]:
+        if fresh is not None:
+            return fresh
+        return previous.get(key) or {}
+
+    return {
+        "battery_settings": pick("battery_settings", battery_settings),
+        "relay_settings": pick("relay_settings", relay_settings),
+    }
+
+
 def relay_settings_enabled(relay_settings: dict[str, Any] | None) -> bool:
     """Return whether relay automation appears enabled."""
     if not relay_settings_readable(relay_settings):
@@ -680,6 +704,8 @@ def get_indicator_value(
     for item in items:
         if item.get("key") == key:
             return item.get("val")
+    if key == "frequency":
+        return get_indicator_value(indicators, "grid_f")
     return None
 
 
@@ -1131,6 +1157,10 @@ def get_ev_charger_power(
     """Return verified burst charger watts; missing data is never a zero."""
     if not has_ev_charger(station_data):
         return None
+    if "burst" in (station_data or {}):
+        from .burst import select_power
+        _, value = select_power(station_data, "ev_charger_power")
+        return value
     live = get_fresh_live_data(station_data, now=now)
     es = live.get("es") if live else None
     if not isinstance(es, dict):
@@ -1231,3 +1261,120 @@ def build_station_capabilities(
         "supports_mode_5": BATTERY_MODE_FORCE_CHARGE in get_backend_modes(battery_settings),
         "supports_mode_6": BATTERY_MODE_FORCE_DISCHARGE in get_backend_modes(battery_settings),
     }
+
+
+def normalize_microinverter_placeholders(
+    pv: dict[str, Any], grid: dict[str, Any],
+    devices: dict[str, Any], real_time: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Withhold the cloud's empty hybrid template on generating micro plants.
+
+    This deliberately requires contradictory telemetry and the full observed
+    template. Zero export, darkness, and real hybrid measurements stay intact.
+    AC station power is not a substitute for DC PV power or phase measurements.
+    """
+    if not devices.get("microinverters") or devices.get("inverters") or devices.get("batteries"):
+        return pv, grid
+    power = _optional_float(real_time.get("real_power"))
+    channels = discover_pv_channels(pv)
+    if (power is None or not math.isfinite(power) or power <= 0 or not channels
+            or find_placeholder_pv_channels(pv) != channels
+            or not _is_zero(get_indicator_value(pv, "pv_p_total"))):
+        return pv, grid
+    normalized_pv = deepcopy(pv)
+    for item in normalized_pv.get("list", []):
+        if item.get("key") == "pv_p_total":
+            item["val"] = None
+    grid_values = get_indicator_map(grid)
+    if (all(key in grid_values for key in ("grid_state", "grid_f", "v_a", "p_total"))
+            and all(_is_zero(value) for value in grid_values.values())):
+        grid = deepcopy(grid)
+        for item in grid.get("list", []):
+            item["val"] = None
+    return normalized_pv, grid
+
+
+def microinverter_module_targets(microinverters: dict[str, Any]) -> dict[int, list[int]]:
+    """Require an explicit device id and port count for every device."""
+    targets: dict[int, list[int]] = {}
+    for micro in microinverters.values():
+        count = get_microinverter_port_count(micro)
+        device_id = micro.get("id") if isinstance(micro, dict) else None
+        if count is None or isinstance(device_id, bool):
+            return {}
+        try:
+            device_id = int(device_id)
+        except (TypeError, ValueError):
+            return {}
+        if device_id in targets:
+            return {}
+        targets[device_id] = list(range(1, count + 1))
+    return targets
+
+
+def merge_microinverter_pv_total(
+    pv: dict[str, Any], targets: dict[int, list[int]],
+    values: dict[int, dict[int, dict[str, float | None]]],
+) -> dict[str, Any]:
+    """Recover DC total only from a complete set of device-addressed samples.
+
+    Never map device ports onto the ambiguous station-level channel numbers.
+    """
+    if not targets:
+        return pv
+    total = 0.0
+    for device_id, ports in targets.items():
+        for port in ports:
+            power = _optional_float(values.get(device_id, {}).get(port, {}).get("MODULE_POWER"))
+            if power is None or not math.isfinite(power) or power < 0:
+                return pv
+            total += power
+    result = deepcopy(pv)
+    _replace_indicator_value(result.setdefault("list", []), "pv_p_total", total, replace_zero=True)
+    return result
+
+
+def get_module_measurement(station: dict[str, Any], serial: str, port: int, metric: str) -> float | None:
+    """Resolve a sample by a unique serial and declared physical port."""
+    matches = [item for item in station.get("devices", {}).get("microinverters", {}).values()
+               if isinstance(item, dict) and (item.get("sn") or item.get("micro_sn")) == serial]
+    if len(matches) != 1:
+        return None
+    device = matches[0]
+    count = get_microinverter_port_count(device)
+    if count is None or not 1 <= port <= count:
+        return None
+    try:
+        device_id = int(device["id"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    raw = station.get("module_data", {}).get(device_id, {}).get(port, {}).get(metric)
+    if isinstance(raw, bool):
+        return None
+    value = _optional_float(raw)
+    return value if value is not None and math.isfinite(value) and value >= 0 else None
+
+
+def get_grid_energy(station: dict[str, Any], direction: str, period: str) -> float | None:
+    """Use explicit grid counters, retaining legacy-only API compatibility.
+
+    Select a counter family, not the first nonzero value. A missing/invalid
+    period in an advertised grid family must not switch to a different meter.
+    All source counters are Wh; no unit conversion is needed here.
+    """
+    if direction not in {"in", "out"} or period not in {"today_eq", "month_eq", "year_eq", "total_eq"}:
+        return None
+    reflux = _reflux_data(station)
+    explicit = f"grid_{direction}_eq"
+    if explicit in reflux:
+        family = reflux[explicit]
+        raw = family.get(period) if isinstance(family, dict) else None
+    elif period == "today_eq" and f"meter_b_{direction}_eq" in reflux:
+        raw = reflux[f"meter_b_{direction}_eq"]
+    else:
+        family = reflux.get(f"mb_{direction}_eq")
+        raw = family.get(period) if isinstance(family, dict) else None
+    if isinstance(raw, bool):
+        return None
+    value = _optional_float(raw)
+    return value if value is not None and math.isfinite(value) and value >= 0 else None

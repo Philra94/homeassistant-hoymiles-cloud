@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from typing import Any
 
 try:
@@ -27,6 +28,7 @@ except ImportError:  # pragma: no cover - enables pure unit tests without Home A
 
         return _redact(data)
 
+from .burst import Sample
 from .const import CONF_APP_VERSION, CONF_AUTH_MODE, DOMAIN
 from .data import (
     get_allowed_battery_modes,
@@ -35,6 +37,22 @@ from .data import (
 )
 
 REDACT_KEYS = {
+    "ak",
+    "access_key",
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "secret",
+    "cookie",
+    "cookies",
+    "session",
+    "session_id",
+    "create_by",
+    "create_by_name",
+    "owner_list",
+    "contact",
     "address",
     "addr",
     "authorization",
@@ -74,6 +92,11 @@ REDACT_KEYS = {
 # Any key ending in one of these is redacted as well, so an unknown field in a
 # telemetry payload cannot leak a serial or an address.
 REDACT_KEY_SUFFIXES = (
+    "_token",
+    "_password",
+    "_secret",
+    "_key",
+    "_cookie",
     "_sn",
     "_addr",
     "_address",
@@ -108,6 +131,11 @@ def _redact_sensitive_keys(value: Any) -> Any:
         }
     if isinstance(value, list):
         return [_redact_sensitive_keys(item) for item in value]
+    if isinstance(value, str) and re.search(
+        r"(?i)(?:\b[\w-]+\.local\b|(?:^|[/\\])\.local(?:[/\\]|$)|(?:^|[/\\])\.env(?:\b|$))",
+        value,
+    ):
+        return "**REDACTED**"
     return value
 
 
@@ -157,6 +185,12 @@ def _station_summary(station_data: dict[str, Any]) -> dict[str, Any]:
         # be diagnosed without them.
         "real_time_data": station_data.get("real_time_data", {}),
         "live_data": station_data.get("live_data", {}),
+        "burst": {
+            scope: {"state": sample.state, "delay_seconds": sample.delay,
+                    "schema": [key for key in ("es", "power", "mis") if key in sample.data]}
+            for scope, sample in station_data.get("burst", {}).items()
+            if isinstance(sample, Sample)
+        },
         "pv_indicators": station_data.get("pv_indicators", {}),
         "grid_indicators": station_data.get("grid_indicators", {}),
         "load_indicators": station_data.get("load_indicators", {}),

@@ -23,6 +23,7 @@ get_signed_battery_power = data_module.get_signed_battery_power
 has_ev_charger = data_module.has_ev_charger
 is_battery_charging = data_module.is_battery_charging
 latest_module_values = data_module.latest_module_values
+merge_control_settings = data_module.merge_control_settings
 merge_missing_pv_channel_values = data_module.merge_missing_pv_channel_values
 relay_settings_enabled = data_module.relay_settings_enabled
 seed_missing_pv_channels = data_module.seed_missing_pv_channels
@@ -849,3 +850,162 @@ def test_missing_second_port_is_seeded_independently_of_station_pv2_flag():
         real_time_data=realtime, pv_indicators=seeded,
         battery_settings={}, microinverters_data=inventory,
     )['pv_channels'] == [1, 2]
+
+
+def test_merge_control_settings_keeps_previous_when_a_read_fails() -> None:
+    """A timed-out settings read (None) must not wipe controls that were valid a moment ago (#74)."""
+    previous = {
+        "battery_settings": {"mode": 1, "mode_data": {"1": {"reserve_soc": 10}}},
+        "relay_settings": {"enabled": True},
+    }
+
+    merged = merge_control_settings(previous, None, None)
+
+    assert merged == previous
+
+
+def test_merge_control_settings_replaces_what_was_read_and_keeps_the_rest() -> None:
+    previous = {
+        "battery_settings": {"mode": 1},
+        "relay_settings": {"enabled": True},
+    }
+
+    merged = merge_control_settings(previous, {"mode": 2}, None)
+
+    assert merged == {"battery_settings": {"mode": 2}, "relay_settings": {"enabled": True}}
+
+
+def test_merge_control_settings_without_cache_falls_back_to_empty() -> None:
+    assert merge_control_settings(None, None, None) == {
+        "battery_settings": {},
+        "relay_settings": {},
+    }
+    assert merge_control_settings(None, {"mode": 1}, {}) == {
+        "battery_settings": {"mode": 1},
+        "relay_settings": {},
+    }
+
+
+def test_control_cache_explicit_denial_clears_previous_permissions():
+    previous = {"battery_settings": {"readable": True, "writable": True},
+                "relay_settings": {"readable": True, "writable": True}}
+    denied = {"readable": False, "writable": False, "message": "No Permission"}
+    assert merge_control_settings(previous, denied, {}) == {
+        "battery_settings": denied, "relay_settings": {}}
+    assert previous["battery_settings"]["writable"] is True
+
+
+def _micro_placeholder_payloads():
+    return ({'list': [{'key': 'pv_p_total', 'val': '0'},
+                      *({'key': f'1_pv_{metric}', 'val': '-'} for metric in ('v', 'i', 'p'))]},
+            {'list': [{'key': key, 'val': '0'} for key in ('grid_state', 'grid_f', 'v_a', 'p_total')]})
+
+
+def test_micro_empty_template_is_unknown_while_station_generates():
+    pv, grid = _micro_placeholder_payloads()
+    result, normalized_grid = data_module.normalize_microinverter_placeholders(
+        pv, grid, {'microinverters': {'one': {}}}, {'real_power': 200})
+    assert data_module.get_indicator_value(result, 'pv_p_total') is None
+    assert all(item['val'] is None for item in normalized_grid['list'])
+    assert pv['list'][0]['val'] == '0'
+    assert grid['list'][0]['val'] == '0'
+
+
+@pytest.mark.parametrize('devices,power', [
+    ({'microinverters': {'one': {}}, 'inverters': [{}]}, 200),
+    ({'microinverters': {'one': {}}, 'batteries': [{}]}, 200),
+    ({'microinverters': {'one': {}}}, 0),
+    ({'microinverters': {'one': {}}}, None),
+    ({'microinverters': {'one': {}}}, float('nan')),
+    ({}, 200),
+])
+def test_micro_template_filter_preserves_other_station_cases(devices, power):
+    pv, grid = _micro_placeholder_payloads()
+    assert data_module.normalize_microinverter_placeholders(pv, grid, devices, {'real_power': power}) == (pv, grid)
+
+
+def test_real_zero_grid_export_is_preserved():
+    pv, grid = _micro_placeholder_payloads()
+    grid['list'][2]['val'] = 230
+    _, result = data_module.normalize_microinverter_placeholders(
+        pv, grid, {'microinverters': {'one': {}}}, {'real_power': 200})
+    assert data_module.get_indicator_value(result, 'p_total') == '0'
+
+
+def test_multi_device_pv_total_uses_every_port_without_mapping_channels():
+    targets = data_module.microinverter_module_targets({
+        'first': {'id': 1, 'rule': {'port': 2}}, 'second': {'id': 2, 'rule': {'port': 1}},
+    })
+    assert targets == {1: [1, 2], 2: [1]}
+    values = {1: {1: {'MODULE_POWER': 10}, 2: {'MODULE_POWER': 20}}, 2: {1: {'MODULE_POWER': 30}}}
+    pv, _ = _micro_placeholder_payloads()
+    result = data_module.merge_microinverter_pv_total(pv, targets, values)
+    assert data_module.get_indicator_value(result, 'pv_p_total') == 60
+    assert data_module.get_indicator_value(result, '1_pv_p') == '-'
+    assert pv['list'][0]['val'] == '0'
+    # A missing or invalid port must never yield a plausible partial total.
+    for invalid in (None, float('nan'), float('inf'), -1):
+        values[1][2]['MODULE_POWER'] = invalid
+        assert data_module.merge_microinverter_pv_total(pv, targets, values) == pv
+    del values[1][2]
+    assert data_module.merge_microinverter_pv_total(pv, targets, values) == pv
+
+
+def test_module_targets_require_complete_inventory():
+    assert data_module.microinverter_module_targets({'one': {'id': 1, 'rule': {'port': 2}}, 'two': {}}) == {}
+    assert data_module.microinverter_module_targets({'one': {'id': True, 'rule': {'port': 2}}}) == {}
+
+
+def test_grid_frequency_accepts_backend_key_and_preserves_legacy_key():
+    assert data_module.get_indicator_value({'list': [{'key': 'grid_f', 'val': 50}]}, 'frequency') == 50
+    assert data_module.get_indicator_value({'list': [{'key': 'frequency', 'val': 60}, {'key': 'grid_f', 'val': 50}]}, 'frequency') == 60
+
+
+def test_module_measurements_use_device_identity_not_inventory_order():
+    station = {'devices': {'microinverters': {
+        'b': {'id': 2, 'sn': 'synthetic-b', 'rule': {'port': 2}},
+        'a': {'id': 1, 'sn': 'synthetic-a', 'rule': {'port': 2}},
+    }}, 'module_data': {1: {1: {'MODULE_V': 31, 'MODULE_POWER': 100}},
+                       2: {1: {'MODULE_V': 42, 'MODULE_POWER': 200}}}}
+    get = data_module.get_module_measurement
+    assert get(station, 'synthetic-a', 1, 'MODULE_V') == 31
+    assert get(station, 'synthetic-b', 1, 'MODULE_POWER') == 200
+    assert get(station, 'unknown', 1, 'MODULE_V') is None
+    assert get(station, 'synthetic-a', 2, 'MODULE_V') is None
+    assert get(station, 'synthetic-a', 3, 'MODULE_V') is None
+    for value in [None, True, -1, float('nan'), float('inf')]:
+        station['module_data'][1][1]['MODULE_V'] = value
+        assert get(station, 'synthetic-a', 1, 'MODULE_V') is None
+    station['devices']['microinverters']['duplicate'] = {'id': 3, 'sn': 'synthetic-b', 'rule': {'port': 2}}
+    assert get(station, 'synthetic-b', 1, 'MODULE_POWER') is None
+
+
+@pytest.mark.parametrize('direction', ['in', 'out'])
+@pytest.mark.parametrize('period', ['today_eq', 'month_eq', 'year_eq', 'total_eq'])
+def test_grid_energy_prefers_explicit_counter_family(direction, period):
+    # Synthetic, deliberately different counters reproduce issue #80.
+    reflux = {f'grid_{direction}_eq': {period: '12345.5'},
+              f'mb_{direction}_eq': {period: '456'}, f'meter_b_{direction}_eq': '789'}
+    station = {'real_time_data': {'reflux_station_data': reflux}}
+    assert data_module.get_grid_energy(station, direction, period) == 12345.5
+    reflux[f'grid_{direction}_eq'][period] = '0'
+    assert data_module.get_grid_energy(station, direction, period) == 0
+    for invalid in [None, '-', '', 'nan', 'inf', '-1', True]:
+        reflux[f'grid_{direction}_eq'][period] = invalid
+        assert data_module.get_grid_energy(station, direction, period) is None
+    for missing in [{}, None, []]:
+        reflux[f'grid_{direction}_eq'] = missing
+        assert data_module.get_grid_energy(station, direction, period) is None
+    del reflux[f'grid_{direction}_eq']
+    expected = 789 if period == 'today_eq' else 456
+    assert data_module.get_grid_energy(station, direction, period) == expected
+    del reflux[f'meter_b_{direction}_eq']
+    assert data_module.get_grid_energy(station, direction, period) == 456
+
+
+def test_grid_energy_does_not_mix_import_and_export():
+    station = {'real_time_data': {'reflux_station_data': {
+        'grid_in_eq': {'total_eq': '100'}, 'grid_out_eq': {'total_eq': '200'}}}}
+    assert data_module.get_grid_energy(station, 'in', 'total_eq') == 100
+    assert data_module.get_grid_energy(station, 'out', 'total_eq') == 200
+    assert data_module.get_grid_energy({}, 'in', 'total_eq') is None
