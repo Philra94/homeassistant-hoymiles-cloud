@@ -90,6 +90,15 @@ from .chart_pb import decode_line_chart
 _LOGGER = logging.getLogger(__name__)
 
 
+class HoymilesConnectionError(aiohttp.ClientConnectionError):
+    """No login endpoint gave a verdict, so the credentials were never checked.
+
+    Subclasses aiohttp's error so Home Assistant handles it like any other
+    connection failure: ConfigEntryNotReady during setup and a retried
+    UpdateFailed in the coordinator, never a reauth prompt.
+    """
+
+
 class LiveDataError(Exception):
     """Live telemetry is temporarily unavailable or malformed."""
 
@@ -137,6 +146,11 @@ def _values_match(actual: Any, expected: Any) -> bool:
         return float(actual) == float(expected)
     except (TypeError, ValueError):
         return str(actual) == str(expected)
+
+
+def _is_connection_error(err: BaseException) -> bool:
+    """Return True for transport failures that never reached an auth decision."""
+    return isinstance(err, (aiohttp.ClientError, asyncio.TimeoutError))
 
 
 class HoymilesAPI:
@@ -769,6 +783,7 @@ class HoymilesAPI:
                     success=False,
                     message=str(e),
                     app_version=app_version,
+                    connection_error=_is_connection_error(e),
                 )
             )
 
@@ -837,6 +852,7 @@ class HoymilesAPI:
                     message=str(e),
                     app_version=app_version,
                     variant=variant_name,
+                    connection_error=_is_connection_error(e),
                 )
             )
 
@@ -1044,6 +1060,7 @@ class HoymilesAPI:
                     client_profile=CLIENT_PROFILE_WEB,
                     success=False,
                     message=str(e),
+                    connection_error=_is_connection_error(e),
                 )
             )
 
@@ -1098,8 +1115,19 @@ class HoymilesAPI:
             preferred_failure = choose_preferred_failure(attempts)
             if preferred_failure is not None:
                 self._record_auth_failure(preferred_failure)
+            if any(attempt.connection_error for attempt in attempts):
+                # An unreachable profile might have accepted the credentials,
+                # so this run is no verdict: retry later instead of reauth.
+                # Debug only: retries repeat every poll during an outage and the
+                # coordinator already reports the outage once.
+                _LOGGER.debug("Hoymiles auth unreachable: %s", self.last_auth_attempt_summary)
+                raise HoymilesConnectionError(
+                    f"Hoymiles Cloud unreachable: {self.last_auth_attempt_summary}"
+                )
             _LOGGER.warning("Hoymiles auth failed after attempts: %s", self.last_auth_attempt_summary)
             return False
+        except HoymilesConnectionError:
+            raise
         except Exception as e:
             _LOGGER.error("Error during authentication: %s", e)
             raise
