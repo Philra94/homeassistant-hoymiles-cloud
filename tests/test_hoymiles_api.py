@@ -93,6 +93,8 @@ class FakeSession:
             raise AssertionError("No fake responses left")
         self.requests.append({"args": args, "kwargs": kwargs})
         response = self._responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
         if isinstance(response, bytes):
             return FakeBytesRequest(response)
         return FakeRequest(response)
@@ -401,6 +403,37 @@ def test_pre_insp_accepts_top_level_payload_shape() -> None:
 
     assert authenticated is True
     assert api.auth_method == "web_v3:sha256_v3"
+
+
+def test_authenticate_raises_connection_error_when_cloud_unreachable() -> None:
+    """A DNS/connection failure is no credential verdict and must not trigger reauth."""
+    import aiohttp
+
+    session = FakeSession([aiohttp.ClientConnectionError("Could not contact DNS servers")] * 4)
+    api = HoymilesAPI(session, "user@example.com", "secret")
+
+    with pytest.raises(hoymiles_api_module.HoymilesConnectionError):
+        asyncio.run(api.authenticate())
+
+    assert api.last_auth_error_key != auth_module.AUTH_ERROR_INVALID_AUTH
+
+
+def test_authenticate_mixed_rejection_and_unreachable_is_not_an_auth_verdict() -> None:
+    """Only a run where every profile answered may conclude the credentials are bad."""
+    import aiohttp
+
+    session = FakeSession(
+        [
+            {"status": "1", "message": "Invalid credentials"},  # web_v3 pre-insp
+            {"status": "1", "message": "Invalid credentials"},  # installer_v3 pre-insp
+            asyncio.TimeoutError(),  # home_v3 pre-insp
+            {"status": "1", "message": "Invalid credentials"},  # legacy_v0 login
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+
+    with pytest.raises(aiohttp.ClientError):
+        asyncio.run(api.authenticate())
 
 
 def test_auth_attempt_summary_records_attempted_profiles() -> None:
