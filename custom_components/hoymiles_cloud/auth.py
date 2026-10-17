@@ -9,6 +9,7 @@ AUTH_ERROR_S_MILES_HOME_REQUIRED = "s_miles_home_required"
 AUTH_ERROR_NO_ACCESSIBLE_STATIONS = "no_accessible_stations"
 AUTH_ERROR_INVALID_AUTH = "invalid_auth"
 AUTH_ERROR_UNKNOWN = "unknown"
+AUTH_ERROR_CANNOT_CONNECT = "cannot_connect"
 
 
 @dataclass(slots=True)
@@ -23,10 +24,15 @@ class AuthAttempt:
     token: str | None = None
     app_version: str | None = None
     variant: str | None = None
+    # The request never got an answer (DNS, connect, timeout, non-JSON reply),
+    # so this attempt says nothing about whether the credentials are valid.
+    connection_error: bool = False
 
     @property
     def error_key(self) -> str:
         """Return a normalized error key for this attempt."""
+        if self.connection_error:
+            return AUTH_ERROR_CANNOT_CONNECT
         return classify_auth_failure(self.status, self.message)
 
     def summary(self) -> str:
@@ -72,6 +78,8 @@ def summarize_auth_attempts(attempts: list[AuthAttempt]) -> str:
 
 def auth_error_to_config_error(error_key: str | None) -> str:
     """Map a normalized auth error key to a config flow error key."""
+    if error_key == AUTH_ERROR_CANNOT_CONNECT:
+        return AUTH_ERROR_CANNOT_CONNECT
     if error_key == AUTH_ERROR_APP_UPDATE_REQUIRED:
         return AUTH_ERROR_APP_UPDATE_REQUIRED
     if error_key == AUTH_ERROR_S_MILES_HOME_REQUIRED:

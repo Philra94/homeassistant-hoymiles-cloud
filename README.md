@@ -281,3 +281,11 @@ current remain chart measurements. The chart refresh is cached for 240 seconds,
 and failed reads do not borrow another device's values. These sensors do not
 rename or remap existing station-level PV channels. No additional services or
 write permissions are introduced.
+
+### RC6 authentication recovery
+
+Temporary login connection errors, timeouts and non-JSON responses are retried
+instead of being treated as invalid credentials. Successful login profiles still
+win; explicit credential rejection still requests correction. This adapts PR #81
+into the 1.4 RC line and preserves the RC5 fixes. No new service or write permission
+is introduced.

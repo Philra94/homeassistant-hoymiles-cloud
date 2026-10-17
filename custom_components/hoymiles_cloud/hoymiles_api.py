@@ -90,6 +90,14 @@ from .chart_pb import decode_line_chart
 _LOGGER = logging.getLogger(__name__)
 
 
+class HoymilesConnectionError(aiohttp.ClientConnectionError):
+    """A transient login failure is not a credential rejection."""
+
+
+def _is_connection_error(err: BaseException) -> bool:
+    return isinstance(err, (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError))
+
+
 class LiveDataError(Exception):
     """Live telemetry is temporarily unavailable or malformed."""
 
@@ -803,13 +811,14 @@ class HoymilesAPI:
             ) as response:
                 pre_resp = await response.json()
         except Exception as e:
-            _LOGGER.debug("Argon2 pre-inspection request failed: %s", e)
+            _LOGGER.debug("Argon2 pre-inspection request failed: %s", type(e).__name__)
             return self._record_auth_failure(
                 AuthAttempt(
                     method=method_name,
                     client_profile=client_profile,
                     success=False,
-                    message=str(e),
+                    message="Authentication response unavailable" if _is_connection_error(e) else str(e),
+                    connection_error=_is_connection_error(e),
                     app_version=app_version,
                 )
             )
@@ -870,13 +879,14 @@ class HoymilesAPI:
             ) as response:
                 resp = await response.json()
         except Exception as e:
-            _LOGGER.debug("Argon2 login request failed: %s", e)
+            _LOGGER.debug("Argon2 login request failed: %s", type(e).__name__)
             return self._record_auth_failure(
                 AuthAttempt(
                     method=method_name,
                     client_profile=client_profile,
                     success=False,
-                    message=str(e),
+                    message="Authentication response unavailable" if _is_connection_error(e) else str(e),
+                    connection_error=_is_connection_error(e),
                     app_version=app_version,
                     variant=variant_name,
                 )
@@ -1051,6 +1061,8 @@ class HoymilesAPI:
             if attempt.success:
                 return attempt
             last_failure = attempt
+            if attempt.connection_error:
+                return attempt
             if not self._should_retry_unsalted_variant(attempt.status, attempt.message):
                 return attempt
 
@@ -1079,13 +1091,14 @@ class HoymilesAPI:
             ) as response:
                 resp = await response.json()
         except Exception as e:
-            _LOGGER.debug("Legacy authentication request failed: %s", e)
+            _LOGGER.debug("Legacy authentication request failed: %s", type(e).__name__)
             return self._record_auth_failure(
                 AuthAttempt(
                     method=AUTH_MODE_LEGACY_V0,
                     client_profile=CLIENT_PROFILE_WEB,
                     success=False,
-                    message=str(e),
+                    message="Authentication response unavailable" if _is_connection_error(e) else str(e),
+                    connection_error=_is_connection_error(e),
                 )
             )
 
@@ -1140,8 +1153,13 @@ class HoymilesAPI:
             preferred_failure = choose_preferred_failure(attempts)
             if preferred_failure is not None:
                 self._record_auth_failure(preferred_failure)
+            if any(attempt.connection_error for attempt in attempts):
+                self._last_auth_error_key = "cannot_connect"
+                raise HoymilesConnectionError("Hoymiles authentication temporarily unavailable")
             _LOGGER.warning("Hoymiles auth failed after attempts: %s", self.last_auth_attempt_summary)
             return False
+        except HoymilesConnectionError:
+            raise
         except Exception as e:
             _LOGGER.error("Error during authentication: %s", e)
             raise

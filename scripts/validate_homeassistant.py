@@ -388,6 +388,16 @@ async def main() -> None:
             assert coordinator.data["station-a"]["telemetry_available"]
             FakeAPI.fail_station = None
 
+            from custom_components.hoymiles_cloud.hoymiles_api import HoymilesConnectionError
+            with patch.object(runtime["api"], "_ensure_authenticated", AsyncMock(
+                side_effect=HoymilesConnectionError("synthetic network outage")
+            )):
+                await coordinator.async_refresh()
+                assert not coordinator.last_update_success
+                assert not reauth_requests, "network outage requested reauthentication"
+            await coordinator.async_refresh()
+            assert coordinator.last_update_success, "network recovery did not resume updates"
+
             FakeAPI.auth_failure = True
             if FakeAPI.fast_polling:
                 poller._due.clear()

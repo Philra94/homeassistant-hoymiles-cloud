@@ -93,6 +93,8 @@ class FakeSession:
             raise AssertionError("No fake responses left")
         self.requests.append({"args": args, "kwargs": kwargs})
         response = self._responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
         if isinstance(response, bytes):
             return FakeBytesRequest(response)
         return FakeRequest(response)
@@ -401,6 +403,37 @@ def test_pre_insp_accepts_top_level_payload_shape() -> None:
 
     assert authenticated is True
     assert api.auth_method == "web_v3:sha256_v3"
+
+
+def test_authenticate_raises_connection_error_when_cloud_unreachable() -> None:
+    """A DNS/connection failure is no credential verdict and must not trigger reauth."""
+    import aiohttp
+
+    session = FakeSession([aiohttp.ClientConnectionError("Could not contact DNS servers")] * 4)
+    api = HoymilesAPI(session, "user@example.com", "secret")
+
+    with pytest.raises(hoymiles_api_module.HoymilesConnectionError):
+        asyncio.run(api.authenticate())
+
+    assert api.last_auth_error_key != auth_module.AUTH_ERROR_INVALID_AUTH
+
+
+def test_authenticate_mixed_rejection_and_unreachable_is_not_an_auth_verdict() -> None:
+    """Only a run where every profile answered may conclude the credentials are bad."""
+    import aiohttp
+
+    session = FakeSession(
+        [
+            {"status": "1", "message": "Invalid credentials"},  # web_v3 pre-insp
+            {"status": "1", "message": "Invalid credentials"},  # installer_v3 pre-insp
+            asyncio.TimeoutError(),  # home_v3 pre-insp
+            {"status": "1", "message": "Invalid credentials"},  # legacy_v0 login
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+
+    with pytest.raises(aiohttp.ClientError):
+        asyncio.run(api.authenticate())
 
 
 def test_auth_attempt_summary_records_attempted_profiles() -> None:
@@ -907,3 +940,41 @@ def test_write_verification_retries_transient_reads_without_duplicate_write():
     assert asyncio.run(api._verify_battery_mode_applied('1', 1, {})) is None
     assert api.get_battery_settings.await_count == 3
     assert api._session.requests == []
+
+
+@pytest.mark.parametrize('failure_kind', ['connection', 'timeout', 'json'])
+def test_transient_login_error_is_safe_and_recoverable(failure_kind, caplog):
+    import aiohttp
+    import json
+    import logging
+    marker = 'SYNTHETIC_SENSITIVE_MARKER'
+    failure = {'connection': aiohttp.ClientConnectionError(marker),
+               'timeout': TimeoutError(marker),
+               'json': json.JSONDecodeError(marker, marker, 0)}[failure_kind]
+    session = FakeSession([failure, {'status': '0', 'message': 'success', 'data': {'token': 'synthetic-token'}}])
+    api = HoymilesAPI(session, 'example@example.test', 'synthetic-password')
+    with caplog.at_level(logging.DEBUG), pytest.raises(hoymiles_api_module.HoymilesConnectionError) as result:
+        asyncio.run(api.authenticate(auth_mode='legacy_v0'))
+    assert marker not in str(result.value)
+    assert marker not in api.last_auth_attempt_summary
+    assert marker not in caplog.text
+    assert api.last_auth_error_key == 'cannot_connect'
+    assert asyncio.run(api.authenticate(auth_mode='legacy_v0'))
+
+
+def test_successful_profile_wins_over_other_profile_outage():
+    from unittest.mock import AsyncMock
+    api = HoymilesAPI(FakeSession([]), 'example@example.test', 'synthetic-password')
+    api._build_auth_attempts = lambda mode: [('web_v3', 'web'), ('installer_v3', 'installer')]
+    api._authenticate_v3 = AsyncMock(side_effect=[
+        auth_module.AuthAttempt('web_v3', 'web', False, connection_error=True),
+        auth_module.AuthAttempt('installer_v3', 'installer', True, token='synthetic-token'),
+    ])
+    assert asyncio.run(api.authenticate())
+
+
+def test_real_credential_rejection_still_returns_false():
+    api = HoymilesAPI(FakeSession([{'status': '1', 'message': 'Invalid credentials'}]),
+                      'example@example.test', 'synthetic-password')
+    assert not asyncio.run(api.authenticate(auth_mode='legacy_v0'))
+    assert api.last_auth_error_key == 'invalid_auth'
