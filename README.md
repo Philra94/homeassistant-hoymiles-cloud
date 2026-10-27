@@ -2,28 +2,36 @@
 
 This custom integration for Home Assistant allows you to monitor and control your Hoymiles solar inverter system through the Hoymiles Cloud API.
 
-## Stable release: 1.3.1
+## Stable release 1.4.0
 
-Version **1.3.1** promotes the tested 1.3.1rc3 implementation to stable. See the
-[release notes](docs/release-1.3.1.md) for validation and known limitations.
+[1.4.0](docs/release-1.4.0.md) includes the RC6 reliability, telemetry and privacy
+fixes. It also addresses the HACS review: Home Assistant supplies `aiohttp`, so
+it is no longer listed as an integration dependency. HACS default-store inclusion
+is still pending; use the custom-repository installation instructions below.
 
-- EV charger power uses authenticated live burst telemetry instead of the
-  misleading legacy `pile_power` field. Disconnected or unavailable streams
-  produce unavailable readings; connected zero remains zero.
-- Single-microinverter PV channel discovery uses the device's declared port count.
-- Battery commands require readable settings and readback verification.
-- Station failures are isolated, optional entities can appear after setup, and
-  per-account draft storage and same-account reauthentication are supported.
-- Diagnostics redact account details and signed stream URLs.
+Battery controls retain their cache during transient settings-read failures;
+explicit permission denial still removes controls. Temporary login connection
+failures are retried without requesting new credentials. Modern Home Assistant
+uses account-scoped device-parent links.
 
-Update through HACS and restart Home Assistant. Existing entity IDs are retained.
-Keep a configuration backup: rolling back before 1.3.1 does not copy newer
-per-account draft edits back into legacy shared storage.
+Device-addressed module power, voltage and current are available where the cloud
+provides them. Grid energy counters now prefer explicit import/export fields.
+**Upgrading may cause a one-time change in Energy-dashboard statistics** because
+existing entity IDs use corrected counter sources. History is not rewritten;
+compare and repair affected statistics if necessary.
 
-Dedicated fast PV polling (#69) remains in the separate experimental 1.4.0 release
-line and is not included in 1.3.1. Issues #71 (installer setup) and #72 (another
-missing-PV2 report) remain under investigation; this release does not claim to
-resolve them.
+### Optional experimental fast power updates
+
+Enable **Enable fast cloud power updates (experimental)** in integration options.
+It remains **off by default**, including in this stable release. Station and
+microinverter power use the cloud burst stream where available; cadence depends
+on the server, firmware and network. Voltage/current and other measurements keep
+their ordinary sources (module charts are cached for 240 seconds).
+
+Disabling the option reloads the integration and stops burst requests. Missing or
+stale measurements stay unavailable. Cloud grid measurements and legacy PV-channel
+to device-port mapping remain incomplete for some installations. See the release
+notes for known limitations and validation scope.
 
 ## Features
 
@@ -241,3 +249,34 @@ For bugs or feature requests, please [open an issue on GitHub](https://github.co
 ## Disclaimer
 
 This integration is not affiliated with, endorsed by, or connected to Hoymiles Power Electronics Inc. This is a third-party integration developed for personal use.
+
+### RC5 fixes for settings and microinverter telemetry
+
+Transient battery/relay read failures retain the last successfully read settings;
+explicit access denials still remove writable controls. Settings reads for a
+station are serialized through completion of their cloud jobs.
+
+For stations with multiple microinverters, missing PV total power can be recovered
+from the module charts only when every device and port has a valid power sample.
+These are DC measurements; station AC production is not substituted. Station-level
+PV channel numbers remain ambiguous on these installations. An observed empty
+PV/grid template during generation is reported as missing data rather than real
+zero measurements. This does not supply grid voltage/current readings that the
+cloud omits. Grid frequency also accepts the cloud's `grid_f` field.
+
+Multi-microinverter stations also expose DC power, voltage and current per
+identified inverter/port without enabling fast polling. Power entities retain the
+same IDs when fast polling is enabled; fresh burst power takes precedence, while
+an explicitly offline/stale burst does not resurrect chart power. Voltage and
+current remain chart measurements. The chart refresh is cached for 240 seconds,
+and failed reads do not borrow another device's values. These sensors do not
+rename or remap existing station-level PV channels. No additional services or
+write permissions are introduced.
+
+### RC6 authentication recovery
+
+Temporary login connection errors, timeouts and non-JSON responses are retried
+instead of being treated as invalid credentials. Successful login profiles still
+win; explicit credential rejection still requests correction. This adapts PR #81
+into the 1.4 RC line and preserves the RC5 fixes. No new service or write permission
+is introduced.

@@ -208,3 +208,35 @@ def test_diagnostics_tolerate_api_without_fetch_status() -> None:
     diagnostics = _diagnostics_for({"devices": {}})
 
     assert diagnostics["device_fetch_status"] == {}
+
+
+def test_burst_diagnostics_are_json_safe_and_omit_raw_identifiers():
+    import json
+    burst = load_integration_module('burst')
+    sample = burst.Sample({'con': 1, 'mis': [{'sn': 'private-serial', 'pac': 100}],
+                           'uri': 'https://example.test/?token=private'}, 10, 10, 2, 'live')
+    summary = diagnostics_module._station_summary({'burst': {'inverters': sample}})
+    encoded = json.dumps(summary)
+    assert 'private' not in encoded
+    assert summary['burst'] == {'inverters': {'state': 'live', 'delay_seconds': 2, 'schema': ['mis']}}
+
+
+def test_diagnostics_redacts_cloud_keys_and_private_local_values():
+    """New cloud key spellings and private local strings must stay private."""
+    import json
+    payload = {
+        "station_info": {"ak": "SYNTHETIC-KEY", "create_by_name": "person@example.test"},
+        "real_time_data": {
+            "nested": [{"Refresh_Token": "SYNTHETIC-REFRESH", "client_secret": "SYNTHETIC-SECRET"}],
+            "message": "failed to connect to test-device.local",
+            "path": "/synthetic/.local/config.json",
+            "file": "/synthetic/.env",
+            "power": 42,
+        },
+    }
+    result = _diagnostics_for(payload)
+    encoded = json.dumps(result)
+    for private in ("SYNTHETIC-", "person@example.test", "test-device.local", "/synthetic/"):
+        assert private not in encoded
+    assert result["coordinator"]["stations"]["station_1"]["real_time_data"]["power"] == 42
+    assert payload["station_info"]["ak"] == "SYNTHETIC-KEY"

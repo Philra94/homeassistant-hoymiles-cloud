@@ -14,6 +14,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .auth import AUTH_ERROR_NO_ACCESSIBLE_STATIONS, auth_error_to_config_error
 from .const import (
+    CONF_FAST_POLLING,
+    DEFAULT_FAST_POLLING,
     AUTH_MODE_AUTO,
     AUTH_MODE_OPTIONS,
     CONF_APP_VERSION,
@@ -249,6 +251,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                             DEFAULT_SCAN_INTERVAL,
                         ),
                     ): vol.All(vol.Coerce(int), vol.Range(min=30, max=3600)),
+                    vol.Required(
+                        CONF_FAST_POLLING,
+                        default=self.config_entry.options.get(CONF_FAST_POLLING, DEFAULT_FAST_POLLING),
+                    ): bool,
                     vol.Required(
                         CONF_FETCH_GRID_INDICATORS,
                         default=self.config_entry.options.get(

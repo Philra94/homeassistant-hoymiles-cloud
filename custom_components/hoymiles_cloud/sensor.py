@@ -33,6 +33,7 @@ from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from .burst import inverter_targets, select_power, select_channel_power
 from .discovery import register_discovery
 from .const import BATTERY_MODES, DOMAIN, METER_LOCATION_NAMES
 from .data import (
@@ -42,6 +43,8 @@ from .data import (
     get_energy_flow_value,
     get_ev_charger_power,
     get_indicator_value,
+    get_grid_energy,
+    get_module_measurement,
     get_mode_settings,
     get_pv_indicator_value,
     get_schedule_modes,
@@ -329,7 +332,7 @@ STATION_SENSORS: list[HoymilesSensorDescription] = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(get_reflux_data(data).get("meter_b_in_eq")),
+        value_fn=lambda data: get_grid_energy(data, "in", "today_eq"),
     ),
     HoymilesSensorDescription(
         key="grid_export_energy_today",
@@ -337,7 +340,7 @@ STATION_SENSORS: list[HoymilesSensorDescription] = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: safe_int_convert(get_reflux_data(data).get("meter_b_out_eq")),
+        value_fn=lambda data: get_grid_energy(data, "out", "today_eq"),
     ),
     HoymilesSensorDescription(
         key="battery_charge_energy_today",
@@ -373,7 +376,7 @@ STATION_SENSORS: list[HoymilesSensorDescription] = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: get_nested_energy_total(data, "mb_in_eq", "total_eq"),
+        value_fn=lambda data: get_grid_energy(data, "in", "total_eq"),
     ),
     HoymilesSensorDescription(
         key="grid_export_total",
@@ -381,7 +384,7 @@ STATION_SENSORS: list[HoymilesSensorDescription] = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: get_nested_energy_total(data, "mb_out_eq", "total_eq"),
+        value_fn=lambda data: get_grid_energy(data, "out", "total_eq"),
     ),
     HoymilesSensorDescription(
         key="grid_import_month",
@@ -389,7 +392,7 @@ STATION_SENSORS: list[HoymilesSensorDescription] = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: get_nested_energy_total(data, "mb_in_eq", "month_eq"),
+        value_fn=lambda data: get_grid_energy(data, "in", "month_eq"),
     ),
     HoymilesSensorDescription(
         key="grid_import_year",
@@ -397,7 +400,7 @@ STATION_SENSORS: list[HoymilesSensorDescription] = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: get_nested_energy_total(data, "mb_in_eq", "year_eq"),
+        value_fn=lambda data: get_grid_energy(data, "in", "year_eq"),
     ),
     HoymilesSensorDescription(
         key="grid_export_month",
@@ -405,7 +408,7 @@ STATION_SENSORS: list[HoymilesSensorDescription] = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: get_nested_energy_total(data, "mb_out_eq", "month_eq"),
+        value_fn=lambda data: get_grid_energy(data, "out", "month_eq"),
     ),
     HoymilesSensorDescription(
         key="grid_export_year",
@@ -413,7 +416,7 @@ STATION_SENSORS: list[HoymilesSensorDescription] = [
         native_unit_of_measurement=UnitOfEnergy.WATT_HOUR,
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
-        value_fn=lambda data: get_nested_energy_total(data, "mb_out_eq", "year_eq"),
+        value_fn=lambda data: get_grid_energy(data, "out", "year_eq"),
     ),
     HoymilesSensorDescription(
         key="pv_to_battery_today",
@@ -691,7 +694,23 @@ async def async_setup_entry(
                     ]
                 )
 
-            for channel in discover_pv_channels(station_data.get("pv_indicators", {})):
+            targets = inverter_targets(station_data)
+            multiple = len(station_data.get("devices", {}).get("microinverters", {})) > 1
+            for serial, count in targets.items():
+                if "burst" in station_data:
+                    entities.append(HoymilesBurstInverterSensor(coordinator, station_id, station_name, serial))
+                if multiple and ("burst" in station_data or station_data.get("module_data")):
+                    for port in range(1, count + 1):
+                        entities.append(HoymilesBurstInverterSensor(coordinator, station_id, station_name, serial, port))
+                        for metric in ("v", "i"):
+                            entities.append(HoymilesModuleSensor(coordinator, station_id, station_name, serial, port, metric))
+
+            channels = set(discover_pv_channels(station_data.get("pv_indicators", {})))
+            if "burst" in station_data and len(station_data.get("devices", {}).get("microinverters", {})) == 1:
+                targets = inverter_targets(station_data)
+                if len(targets) == 1:
+                    channels.update(range(1, next(iter(targets.values())) + 1))
+            for channel in sorted(channels):
                 entities.extend(
                     [
                         HoymilesPVChannelSensor(coordinator, station_id, station_name, channel, "v"),
@@ -941,6 +960,10 @@ class HoymilesAggregateSensor(HoymilesBaseSensor):
     @property
     def native_value(self) -> StateType:
         """Return the state of the sensor."""
+        if self.entity_description.key in {"pv_power", "pv_string_power", "ev_charger_power"}:
+            handled, value = select_power(self._get_station_data(), self.entity_description.key)
+            if handled:
+                return value
         if not self.entity_description.value_fn:
             return None
         try:
@@ -962,9 +985,13 @@ class HoymilesAggregateSensor(HoymilesBaseSensor):
     @property
     def available(self) -> bool:
         """Return if entity is available."""
+        station_data = self._get_station_data()
+        if self.entity_description.key in {"pv_power", "pv_string_power", "ev_charger_power"}:
+            handled, value = select_power(station_data, self.entity_description.key)
+            if handled:
+                return value is not None
         if not self.coordinator.last_update_success:
             return False
-        station_data = self._get_station_data()
         if (
             station_data.get("telemetry_available") is False
             and self.entity_description.key not in _NON_TELEMETRY_SENSOR_KEYS
@@ -1104,6 +1131,10 @@ class HoymilesPVChannelSensor(HoymilesBaseSensor):
     @property
     def native_value(self) -> float | None:
         """Return the current indicator value."""
+        if self._metric == "p":
+            handled, value = select_channel_power(self._get_station_data(), self._channel)
+            if handled:
+                return value
         return safe_float_convert(
             get_pv_indicator_value(self._get_station_data().get("pv_indicators", {}), self._indicator_key)
         )
@@ -1111,7 +1142,65 @@ class HoymilesPVChannelSensor(HoymilesBaseSensor):
     @property
     def available(self) -> bool:
         """Return whether this PV channel is present in the payload."""
+        if self._metric == "p":
+            handled, value = select_channel_power(self._get_station_data(), self._channel)
+            if handled:
+                return value is not None
         return self.coordinator.last_update_success and has_pv_indicator(self._get_station_data(), self._indicator_key)
+
+
+class HoymilesBurstInverterSensor(HoymilesBaseSensor):
+    """Explicitly addressed AC or string power, without station-port guessing."""
+
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+
+    def __init__(self, coordinator, station_id: str, station_name: str,
+                 serial: str, port: int | None = None) -> None:
+        super().__init__(coordinator, station_id, station_name)
+        self._serial, self._port = serial, port
+        suffix = f"pv{port}_power" if port else "ac_power"
+        label = f"PV{port} Power" if port else "AC Power"
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_micro_{serial}_{suffix}"
+        self._attr_name = f"{station_name} {serial} {label}"
+        inventory = self._get_station_data().get("devices", {}).get("microinverters", {})
+        device = next((item for item in inventory.values() if isinstance(item, dict) and
+                       (item.get("sn") or item.get("micro_sn")) == serial), {})
+        self._attr_device_info = build_inverter_device_info(
+            station_id, station_name, {**device, "sn": serial,
+                                      "model_no": device.get("model_no") or device.get("init_hard_no") or "Microinverter"})
+
+    @property
+    def native_value(self) -> float | None:
+        station = self._get_station_data()
+        handled, value = select_power(station, "pv_power", serial=self._serial, port=self._port)
+        if handled or self._port is None:
+            return value
+        return get_module_measurement(station, self._serial, self._port, "MODULE_POWER")
+
+    @property
+    def available(self) -> bool:
+        return self.coordinator.last_update_success and self.native_value is not None
+
+
+class HoymilesModuleSensor(HoymilesBurstInverterSensor):
+    """Device-addressed DC voltage/current from the module chart."""
+
+    def __init__(self, coordinator, station_id, station_name, serial, port, metric):
+        super().__init__(coordinator, station_id, station_name, serial, port)
+        self._metric = "MODULE_V" if metric == "v" else "MODULE_I"
+        label, unit, device_class, precision = HoymilesPVChannelSensor._METRIC_CONFIG[metric]
+        self._attr_unique_id = f"{DOMAIN}_{station_id}_micro_{serial}_pv{port}_{metric}"
+        self._attr_name = f"{station_name} {serial} PV{port} {label}"
+        self._attr_native_unit_of_measurement = unit
+        self._attr_device_class = device_class
+        self._attr_suggested_display_precision = precision
+
+    @property
+    def native_value(self) -> float | None:
+        return get_module_measurement(self._get_station_data(), self._serial, self._port, self._metric)
 
 
 class HoymilesGridIndicatorSensor(HoymilesBaseSensor):

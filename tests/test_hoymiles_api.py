@@ -93,6 +93,8 @@ class FakeSession:
             raise AssertionError("No fake responses left")
         self.requests.append({"args": args, "kwargs": kwargs})
         response = self._responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
         if isinstance(response, bytes):
             return FakeBytesRequest(response)
         return FakeRequest(response)
@@ -401,6 +403,37 @@ def test_pre_insp_accepts_top_level_payload_shape() -> None:
 
     assert authenticated is True
     assert api.auth_method == "web_v3:sha256_v3"
+
+
+def test_authenticate_raises_connection_error_when_cloud_unreachable() -> None:
+    """A DNS/connection failure is no credential verdict and must not trigger reauth."""
+    import aiohttp
+
+    session = FakeSession([aiohttp.ClientConnectionError("Could not contact DNS servers")] * 4)
+    api = HoymilesAPI(session, "user@example.com", "secret")
+
+    with pytest.raises(hoymiles_api_module.HoymilesConnectionError):
+        asyncio.run(api.authenticate())
+
+    assert api.last_auth_error_key != auth_module.AUTH_ERROR_INVALID_AUTH
+
+
+def test_authenticate_mixed_rejection_and_unreachable_is_not_an_auth_verdict() -> None:
+    """Only a run where every profile answered may conclude the credentials are bad."""
+    import aiohttp
+
+    session = FakeSession(
+        [
+            {"status": "1", "message": "Invalid credentials"},  # web_v3 pre-insp
+            {"status": "1", "message": "Invalid credentials"},  # installer_v3 pre-insp
+            asyncio.TimeoutError(),  # home_v3 pre-insp
+            {"status": "1", "message": "Invalid credentials"},  # legacy_v0 login
+        ]
+    )
+    api = HoymilesAPI(session, "user@example.com", "secret")
+
+    with pytest.raises(aiohttp.ClientError):
+        asyncio.run(api.authenticate())
 
 
 def test_auth_attempt_summary_records_attempted_profiles() -> None:
@@ -820,3 +853,128 @@ def test_battery_write_is_not_claimed_applied_when_verification_is_unreadable() 
     api._token_expires_at = 9999999999
 
     assert asyncio.run(api.set_battery_mode("123", 1)) is False
+
+@pytest.mark.parametrize('kind', ['battery', 'relay'])
+@pytest.mark.parametrize('failure', ['timeout', 'transport', 'pending', 'expired_job'])
+def test_settings_transient_failure_preserves_cache(kind, failure):
+    from unittest.mock import AsyncMock
+    import aiohttp
+    data = load_integration_module('data')
+    api = HoymilesAPI(FakeSession([]), 'example', 'example')
+    api._token = 'synthetic'
+    api._token_expires_at = 9999999999
+    api._ensure_authenticated = AsyncMock()
+    if failure in ('timeout', 'transport'):
+        error = TimeoutError() if failure == 'timeout' else aiohttp.ClientConnectionError()
+        api._submit_battery_settings_command = AsyncMock(side_effect=error)
+    else:
+        api._submit_battery_settings_command = AsyncMock(return_value={
+            'status': '0' if failure == 'pending' else 'timeout',
+            'message': 'success' if failure == 'pending' else 'Timed out',
+            'data': {'code': 2},
+        })
+    async def optional_read():
+        try:
+            return await getattr(api, f'get_{kind}_settings')('1')
+        except hoymiles_api_module.SettingsReadError:
+            return None
+    result = asyncio.run(optional_read())
+    assert result is None
+    previous = {f'{kind}_settings': {'readable': True, 'writable': True, 'data': {'mode': 1}}}
+    assert data.merge_control_settings(previous, None, None)[f'{kind}_settings'] == previous[f'{kind}_settings']
+
+
+@pytest.mark.parametrize('kind', ['battery', 'relay'])
+def test_settings_denial_still_revokes_cached_permissions(kind):
+    from unittest.mock import AsyncMock
+    data = load_integration_module('data')
+    api = HoymilesAPI(FakeSession([]), 'example', 'example')
+    api._ensure_authenticated = AsyncMock()
+    api._submit_battery_settings_command = AsyncMock(return_value={
+        'status': '3', 'message': 'No Permission.', 'data': {'code': 2},
+    })
+    result = asyncio.run(getattr(api, f'get_{kind}_settings')('1'))
+    previous = {f'{kind}_settings': {'readable': True, 'writable': True}}
+    merged = data.merge_control_settings(previous, result if kind == 'battery' else None,
+                                        result if kind == 'relay' else None)
+    assert not merged[f'{kind}_settings']['writable']
+
+
+def test_settings_reads_serialize_the_complete_job():
+    from unittest.mock import AsyncMock
+    api = HoymilesAPI(FakeSession([]), 'example', 'example')
+    api._ensure_authenticated = AsyncMock()
+    async def run():
+        active = 0
+        peak = 0
+        async def submit(*args, **kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return {'status': '0', 'message': 'success', 'data': 'synthetic-job'}
+        async def resolve(*args, **kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return {'status': '0', 'message': 'success', 'data': {'code': 0, 'data': {'mode': 1, 'data': {}}}}
+        api._submit_battery_settings_command = submit
+        api._resolve_battery_settings_command = resolve
+        results = await asyncio.gather(api.get_battery_settings('1'), api.get_relay_settings('1'))
+        assert all(item['readable'] for item in results)
+        assert peak == 1
+    asyncio.run(run())
+
+
+def test_write_verification_retries_transient_reads_without_duplicate_write():
+    from unittest.mock import AsyncMock
+    api = HoymilesAPI(FakeSession([]), 'example', 'example')
+    api.get_battery_settings = AsyncMock(side_effect=[
+        hoymiles_api_module.SettingsReadError('pending'),
+        hoymiles_api_module.SettingsReadError('timeout'),
+        hoymiles_api_module.SettingsReadError('timeout'),
+    ])
+    assert asyncio.run(api._verify_battery_mode_applied('1', 1, {})) is None
+    assert api.get_battery_settings.await_count == 3
+    assert api._session.requests == []
+
+
+@pytest.mark.parametrize('failure_kind', ['connection', 'timeout', 'json'])
+def test_transient_login_error_is_safe_and_recoverable(failure_kind, caplog):
+    import aiohttp
+    import json
+    import logging
+    marker = 'SYNTHETIC_SENSITIVE_MARKER'
+    failure = {'connection': aiohttp.ClientConnectionError(marker),
+               'timeout': TimeoutError(marker),
+               'json': json.JSONDecodeError(marker, marker, 0)}[failure_kind]
+    session = FakeSession([failure, {'status': '0', 'message': 'success', 'data': {'token': 'synthetic-token'}}])
+    api = HoymilesAPI(session, 'example@example.test', 'synthetic-password')
+    with caplog.at_level(logging.DEBUG), pytest.raises(hoymiles_api_module.HoymilesConnectionError) as result:
+        asyncio.run(api.authenticate(auth_mode='legacy_v0'))
+    assert marker not in str(result.value)
+    assert marker not in api.last_auth_attempt_summary
+    assert marker not in caplog.text
+    assert api.last_auth_error_key == 'cannot_connect'
+    assert asyncio.run(api.authenticate(auth_mode='legacy_v0'))
+
+
+def test_successful_profile_wins_over_other_profile_outage():
+    from unittest.mock import AsyncMock
+    api = HoymilesAPI(FakeSession([]), 'example@example.test', 'synthetic-password')
+    api._build_auth_attempts = lambda mode: [('web_v3', 'web'), ('installer_v3', 'installer')]
+    api._authenticate_v3 = AsyncMock(side_effect=[
+        auth_module.AuthAttempt('web_v3', 'web', False, connection_error=True),
+        auth_module.AuthAttempt('installer_v3', 'installer', True, token='synthetic-token'),
+    ])
+    assert asyncio.run(api.authenticate())
+
+
+def test_real_credential_rejection_still_returns_false():
+    api = HoymilesAPI(FakeSession([{'status': '1', 'message': 'Invalid credentials'}]),
+                      'example@example.test', 'synthetic-password')
+    assert not asyncio.run(api.authenticate(auth_mode='legacy_v0'))
+    assert api.last_auth_error_key == 'invalid_auth'
