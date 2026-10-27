@@ -2,45 +2,36 @@
 
 This custom integration for Home Assistant allows you to monitor and control your Hoymiles solar inverter system through the Hoymiles Cloud API.
 
-## Stable release and release candidate
+## Stable release 1.4.0
 
-Stable is [1.3.1](docs/release-1.3.1.md). Installer setup (#71) and missing PV2
-(#72) have since been confirmed fixed after updating.
+[1.4.0](docs/release-1.4.0.md) includes the RC6 reliability, telemetry and privacy
+fixes. It also addresses the HACS review: Home Assistant supplies `aiohttp`, so
+it is no longer listed as an integration dependency. HACS default-store inclusion
+is still pending; use the custom-repository installation instructions below.
 
-[1.4.0rc4](docs/release-1.4.0rc4.md) resolves parent-device links using the
-account-scoped registry ID on modern Home Assistant. It includes the previous
-privacy and control-cache fixes and remains an experimental prerelease.
+Battery controls retain their cache during transient settings-read failures;
+explicit permission denial still removes controls. Temporary login connection
+failures are retried without requesting new credentials. Modern Home Assistant
+uses account-scoped device-parent links.
 
-[1.4.0rc1](docs/release-1.4.0rc1.md) adds experimental **fast cloud power updates**
-for issue #69 on top of RC3. Enable beta versions in HACS, install this candidate,
-restart Home Assistant, then enable **Enable fast cloud power updates
-(experimental)** in the integration's options. It is **off by default**.
+Device-addressed module power, voltage and current are available where the cloud
+provides them. Grid energy counters now prefer explicit import/export fields.
+**Upgrading may cause a one-time change in Energy-dashboard statistics** because
+existing entity IDs use corrected counter sources. History is not rewritten;
+compare and repair affected statistics if necessary.
 
-- Station PV Power and hybrid EV Charger Power use a separate burst poller.
-  Cadence follows the server: HMS users reported 2–3 seconds; our hybrid test
-  returned 10 seconds. Network latency and account size can increase the interval.
-- Single-microinverter PV channel power and its complete string-power total use
-  burst readings while keeping existing entity IDs. Each
-  identified microinverter gains an AC Power sensor. Multi-microinverter stations
-  gain explicitly addressed per-inverter PV power sensors; existing station
-  channels are not remapped or renumbered.
-- Voltage, current, temperature, energy totals, battery/grid/load readings and
-  settings keep their existing sources and ordinary polling interval. No battery
-  controls or energy-counter semantics change.
-- Valid zero remains zero. Disconnected or stale stream data becomes unavailable,
-  not an invented zero. A transport failure falls back to ordinary PV readings
-  where available; burst-only inverter sensors become unavailable. Recovery
-  automatically restores burst readings. Known offline readings cannot fall back
-  to cached slow power.
-- EU burst endpoints are supported. Consumer-specific MS-A2 endpoints and other
-  regions have not been validated. HMS power mapping is covered by source
-  comparison and synthetic tests; real HMS validation remains required.
+### Optional experimental fast power updates
 
-Disabling the option reloads the integration and stops all burst requests.
-Burst-only sensors then become unavailable. Existing entity IDs and per-account
-draft storage are preserved. Back up the configuration before testing; restore
-1.3.1 and restart to remove the feature. New per-entry draft edits are not copied
-back to the older shared storage when rolling back before 1.3.1.
+Enable **Enable fast cloud power updates (experimental)** in integration options.
+It remains **off by default**, including in this stable release. Station and
+microinverter power use the cloud burst stream where available; cadence depends
+on the server, firmware and network. Voltage/current and other measurements keep
+their ordinary sources (module charts are cached for 240 seconds).
+
+Disabling the option reloads the integration and stops burst requests. Missing or
+stale measurements stay unavailable. Cloud grid measurements and legacy PV-channel
+to device-port mapping remain incomplete for some installations. See the release
+notes for known limitations and validation scope.
 
 ## Features
 
