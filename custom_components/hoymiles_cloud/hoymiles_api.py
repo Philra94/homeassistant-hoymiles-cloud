@@ -1958,7 +1958,9 @@ class HoymilesAPI:
         stored = (settings.get("mode_settings") or {}).get(mode) or {}
         for key, expected in (mode_settings or {}).items():
             if key not in stored:
-                continue
+                # Omitted fields cannot confirm persistence. Avoid a duplicate
+                # write through the fallback transport when readback is incomplete.
+                return None
             if not _values_match(stored.get(key), expected):
                 _LOGGER.debug(
                     "Battery write verification for station %s mode %s: "

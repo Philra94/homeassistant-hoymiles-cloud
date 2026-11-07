@@ -10,6 +10,7 @@ from typing import Optional
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
@@ -163,8 +164,10 @@ class HoymilesBatteryModeSelect(CoordinatorEntity, SelectEntity):
                 continue
 
             if not await self._api.set_battery_mode(self._station_id, mode_id):
-                _LOGGER.error("Failed to set battery mode to %s (ID: %s)", option, mode_id)
-                return
+                raise HomeAssistantError(
+                    "Hoymiles could not confirm the battery mode change. "
+                    "Check the current mode in the Hoymiles app before retrying."
+                )
 
             invalidate_control_cache(self.coordinator, self._station_id)
             await self.coordinator.async_request_refresh()

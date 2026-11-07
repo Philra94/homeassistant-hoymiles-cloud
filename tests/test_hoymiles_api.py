@@ -978,3 +978,18 @@ def test_real_credential_rejection_still_returns_false():
                       'example@example.test', 'synthetic-password')
     assert not asyncio.run(api.authenticate(auth_mode='legacy_v0'))
     assert api.last_auth_error_key == 'invalid_auth'
+
+
+def test_incomplete_battery_readback_does_not_confirm_or_repeat_write():
+    from unittest.mock import AsyncMock
+    api = HoymilesAPI(FakeSession([]), 'example', 'example')
+    api._write_battery_mode_payload = AsyncMock(return_value=True)
+    api.set_battery_config_direct = AsyncMock(return_value=True)
+    api.get_battery_settings = AsyncMock(return_value={
+        'readable': True, 'writable': True, 'data': {'mode': 1},
+        'mode_settings': {1: {}},
+    })
+    assert asyncio.run(api.apply_battery_mode_payload('1', 1, {'reserve_soc': 20})) is False
+    api.set_battery_config_direct.assert_not_awaited()
+    api.get_battery_settings.return_value['mode_settings'][1]['reserve_soc'] = 20
+    assert asyncio.run(api.apply_battery_mode_payload('1', 1, {'reserve_soc': 20})) is True
