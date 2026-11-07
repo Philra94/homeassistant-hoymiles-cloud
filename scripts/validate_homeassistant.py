@@ -341,6 +341,21 @@ async def main() -> None:
             # must retain the user's draft even if the old coordinator data
             # had readable settings. This checks an awaited refresh occurs.
             runtime = hass.data[DOMAIN][entry.entry_id]
+            # Failed mode writes must fail the HA action, not merely log an error.
+            from custom_components.hoymiles_cloud.select import HoymilesBatteryModeSelect, MODE_OPTIONS
+            mode_select = HoymilesBatteryModeSelect(coordinator, runtime["api"], "station-a", "Synthetic station")
+            with patch.object(runtime["api"], "set_battery_mode", AsyncMock(return_value=False)) as write, patch.object(coordinator, "async_request_refresh", AsyncMock()) as refresh:
+                try:
+                    await mode_select.async_select_option(MODE_OPTIONS[1])
+                except HomeAssistantError:
+                    pass
+                else:
+                    raise AssertionError("failed mode write reported successful HA action")
+                write.assert_awaited_once()
+                refresh.assert_not_awaited()
+            with patch.object(runtime["api"], "set_battery_mode", AsyncMock(return_value=True)), patch.object(coordinator, "async_request_refresh", AsyncMock()) as refresh, patch.object(mode_select, "async_write_ha_state"):
+                await mode_select.async_select_option(MODE_OPTIONS[1])
+                refresh.assert_awaited_once()
             # Keep the integration clock below the refresh interval to cover fresh boots.
             with patch("custom_components.hoymiles_cloud.time", SimpleNamespace(
                 monotonic=lambda: 1.0, time=time.time

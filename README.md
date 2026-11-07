@@ -2,6 +2,12 @@
 
 This custom integration for Home Assistant allows you to monitor and control your Hoymiles solar inverter system through the Hoymiles Cloud API.
 
+## Bugfix candidate 1.4.1rc1
+
+[1.4.1rc1](docs/release-1.4.1rc1.md) reports failed battery-mode actions to Home
+Assistant and no longer treats missing readback fields as confirmed settings.
+Enable prereleases in HACS to test it. Stable remains 1.4.0.
+
 ## Stable release 1.4.0
 
 [1.4.0](docs/release-1.4.0.md) includes the RC6 reliability, telemetry and privacy
